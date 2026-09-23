@@ -1,6 +1,6 @@
 services:
   overlord-server:
-    image: ${DOCKER_IMAGE:-ghcr.io/doesntbreaktos/overlord:latest}
+    image: ${DOCKER_IMAGE:-ghcr.io/reggieog01-cpu/overlord:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -97,7 +97,7 @@ services:
       start_period: 40s
 
   overlord-permissions-init:
-    image: ${DOCKER_IMAGE:-ghcr.io/doesntbreaktos/overlord:latest}
+    image: ${DOCKER_IMAGE:-ghcr.io/reggieog01-cpu/overlord:latest}
     user: "0:0"
     read_only: true
     entrypoint: ["/bin/sh", "-ec"]
