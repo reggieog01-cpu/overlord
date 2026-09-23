@@ -2,13 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as clientManager from "./clientManager";
 import {
   clientExists,
+  clientHasConnected,
   deleteClientRow,
   getClientEnrollmentStatus,
   getClientBuildOwnership,
   getClientPublicKeyById,
+  setClientEnrollmentStatus,
   upsertClientRow,
   upsertPendingClientRow,
 } from "./db";
+import { flushQueuedClientDbUpdates } from "./client-db-sync";
 import { encodeMessage } from "./protocol";
 import {
   consumeClientIngressBudget,
@@ -800,5 +803,61 @@ describe("client-bound pending responses", () => {
     expect(pendingCommandReplies.has("logs-id")).toBe(true);
     expect(pendingScripts.has("script-id")).toBe(true);
     expect(screenshotFailureClientId).toBe(senderId);
+  });
+});
+
+describe("first-connect detection", () => {
+  test("client approved while offline still counts as a first connect", async () => {
+    const clientId = uniqueId("offline-approval");
+    const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+    const publicKey = Buffer.from(
+      await crypto.subtle.exportKey("raw", keyPair.publicKey),
+    ).toString("base64");
+
+    // The client sat in purgatory, then an admin approved it while it was offline.
+    expect(upsertPendingClientRow({
+      id: clientId,
+      publicKey,
+      host: "host",
+      ip: "127.0.0.1",
+    })).toBe(true);
+    setClientEnrollmentStatus(clientId, "approved", "test");
+    expect(clientExists(clientId)).toBe(true);
+    expect(clientHasConnected(clientId)).toBe(false);
+
+    const helloOnce = async () => {
+      const ws = createClientSocket(clientId, undefined);
+      const deps = createLifecycleDeps({
+        clearPendingNotificationScreenshots() {},
+        clearClientPluginState() {},
+      });
+      handleWebSocketOpen(ws, deps);
+      const nonceBytes = Buffer.from(ws.data.enrollmentNonce!, "base64");
+      const signature = Buffer.from(
+        await crypto.subtle.sign("Ed25519", keyPair.privateKey, nonceBytes),
+      ).toString("base64");
+      await handleWebSocketMessage(ws, encodeMessage({
+        type: "hello",
+        id: clientId,
+        host: "host",
+        os: "test",
+        arch: "x64",
+        version: "1",
+        user: "user",
+        monitors: 1,
+        publicKey,
+        signature,
+      }), deps);
+      expect(ws.data.enrollmentState).toBe("authenticated");
+      return ws;
+    };
+
+    const first = await helloOnce();
+    expect(first.data.firstConnect).toBe(true);
+    flushQueuedClientDbUpdates();
+    expect(clientHasConnected(clientId)).toBe(true);
+
+    const second = await helloOnce();
+    expect(second.data.firstConnect).toBe(false);
   });
 });

@@ -122,3 +122,73 @@ describe("auto script dispatch RBAC", () => {
     expect(sentScripts(blocked.sent)).not.toContain("echo operator");
   });
 });
+
+describe("auto script dispatch triggers and OS filter", () => {
+  test("on_first_connect scripts run only on a client's first connection", async () => {
+    const admin = await makeUser("admin");
+    const id = `auto-script-first-${Date.now().toString(36)}`;
+    createdScriptIds.push(id);
+    createAutoScript({
+      id,
+      name: "first connect only",
+      trigger: "on_first_connect",
+      script: "echo first",
+      scriptType: "powershell",
+      enabled: true,
+      osFilter: [],
+      createdByUserId: admin.id,
+    });
+
+    const fresh = makeClient(`as-first-client-${Date.now().toString(36)}`);
+    fresh.viewerWs.data.firstConnect = true;
+    dispatchAutoScriptsForConnection(fresh.info, fresh.viewerWs);
+    expect(sentScripts(fresh.sent)).toContain("echo first");
+
+    const known = makeClient(`as-known-client-${Date.now().toString(36)}`);
+    known.viewerWs.data.firstConnect = false;
+    dispatchAutoScriptsForConnection(known.info, known.viewerWs);
+    expect(sentScripts(known.sent)).not.toContain("echo first");
+  });
+
+  test("os filter matches the client OS family, not the exact OS string", async () => {
+    const admin = await makeUser("admin");
+    const winId = `auto-script-osf-win-${Date.now().toString(36)}`;
+    createdScriptIds.push(winId);
+    createAutoScript({
+      id: winId,
+      name: "windows only",
+      trigger: "on_connect",
+      script: "echo windows",
+      scriptType: "powershell",
+      enabled: true,
+      osFilter: ["windows"],
+      createdByUserId: admin.id,
+    });
+    const linuxId = `auto-script-osf-linux-${Date.now().toString(36)}`;
+    createdScriptIds.push(linuxId);
+    createAutoScript({
+      id: linuxId,
+      name: "linux only",
+      trigger: "on_connect",
+      script: "echo linux",
+      scriptType: "bash",
+      enabled: true,
+      osFilter: ["linux"],
+      createdByUserId: admin.id,
+    });
+
+    const windows = makeClient(`as-osf-win-client-${Date.now().toString(36)}`, "Windows 11 23H2");
+    dispatchAutoScriptsForConnection(windows.info, windows.viewerWs);
+    expect(sentScripts(windows.sent)).toContain("echo windows");
+    expect(sentScripts(windows.sent)).not.toContain("echo linux");
+
+    const linux = makeClient(`as-osf-linux-client-${Date.now().toString(36)}`, "Ubuntu 24.04 LTS");
+    dispatchAutoScriptsForConnection(linux.info, linux.viewerWs);
+    expect(sentScripts(linux.sent)).toContain("echo linux");
+    expect(sentScripts(linux.sent)).not.toContain("echo windows");
+
+    const mac = makeClient(`as-osf-mac-client-${Date.now().toString(36)}`, "macOS 15.1");
+    dispatchAutoScriptsForConnection(mac.info, mac.viewerWs);
+    expect(sentScripts(mac.sent)).toHaveLength(0);
+  });
+});

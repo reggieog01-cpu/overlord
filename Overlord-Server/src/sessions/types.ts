@@ -26,6 +26,7 @@ export type SocketData = {
   username?: string;
   authTokenHash?: string;
   wasKnown?: boolean;
+  firstConnect?: boolean;
   autoTasksRan?: boolean;
   autoDeploysRan?: boolean;
   enrollmentNonce?: string;

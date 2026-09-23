@@ -7,7 +7,7 @@ import { encodeMessage } from "../protocol";
 import type { SocketData } from "../sessions/types";
 import type { ClientInfo } from "../types";
 import { logAudit, AuditAction } from "../auditLog";
-import { normalizeClientOs } from "./deploy-utils";
+import { normalizeClientOs, matchesOsFilter } from "./deploy-utils";
 import { createUploadPull } from "./file-transfer-state";
 import { canUserAccessClient, getUserById } from "../users";
 
@@ -111,11 +111,8 @@ export function dispatchAutoDeploysForConnection(
       continue;
     }
 
-    if (deploy.osFilter.length > 0) {
-      const rawOs = (info.os || "").toLowerCase();
-      if (!deploy.osFilter.includes(rawOs)) {
-        continue;
-      }
+    if (!matchesOsFilter(info.os, deploy.osFilter)) {
+      continue;
     }
 
     if (deploy.trigger === "on_connect_once") {

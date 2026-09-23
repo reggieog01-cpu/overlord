@@ -145,6 +145,9 @@ try {
 try {
   db.run(`ALTER TABLE clients ADD COLUMN deny_reason TEXT`);
 } catch {}
+try {
+  db.run(`ALTER TABLE clients ADD COLUMN has_connected INTEGER NOT NULL DEFAULT 0`);
+} catch {}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS client_groups (

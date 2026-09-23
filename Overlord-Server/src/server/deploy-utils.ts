@@ -8,6 +8,30 @@ export function normalizeClientOs(os?: string): DeployOs {
   return "unknown";
 }
 
+// Pretty OS names from /etc/os-release (e.g. "Ubuntu 24.04 LTS") often omit
+// the word "linux", so the family check alone misses most distros.
+const LINUX_DISTRO_HINTS = [
+  "ubuntu", "debian", "fedora", "centos", "rhel", "red hat", "arch",
+  "manjaro", "mint", "suse", "alpine", "kali", "gentoo", "rocky",
+  "alma", "oracle", "raspbian", "pop!_os", "pop os", "elementary",
+  "zorin", "nixos", "void", "slackware", "endeavour", "steamos",
+  "gnu/linux", "openwrt", "raspberry pi os", "amazon linux",
+];
+
+export function matchesOsFilter(rawOs: string | undefined, osFilter: string[]): boolean {
+  if (osFilter.length === 0) return true;
+  const val = String(rawOs || "").toLowerCase();
+  const family = normalizeClientOs(rawOs);
+  return osFilter.some((filter) => {
+    if (filter === "windows") return family === "windows";
+    if (filter === "darwin") return family === "mac" || val.includes("darwin");
+    if (filter === "linux") {
+      return family === "linux" || LINUX_DISTRO_HINTS.some((hint) => val.includes(hint));
+    }
+    return val.includes(filter);
+  });
+}
+
 export function detectUploadOs(filename: string, bytes: Uint8Array): DeployOs {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".exe") || lower.endsWith(".msi") || lower.endsWith(".bat") || lower.endsWith(".cmd") || lower.endsWith(".ps1")) {

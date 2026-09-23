@@ -9,7 +9,7 @@ async function getGeoip() {
 }
 import { logAudit, AuditAction } from "../../auditLog";
 import * as clientManager from "../../clientManager";
-import { clientExists, setOnlineState, setOfflineStates, upsertClientRow, upsertPendingClientRow, getClientEnrollmentStatus, setClientEnrollmentStatus, lookupClientByPublicKey, getClientPublicKeyById, getClientBuildOwnership, getBuild, getBuildByTag, computeClientSuspiciousFlags, type OfflineStateUpdate } from "../../db";
+import { clientExists, clientHasConnected, setOnlineState, setOfflineStates, upsertClientRow, upsertPendingClientRow, getClientEnrollmentStatus, setClientEnrollmentStatus, lookupClientByPublicKey, getClientPublicKeyById, getClientBuildOwnership, getBuild, getBuildByTag, computeClientSuspiciousFlags, type OfflineStateUpdate } from "../../db";
 import { getConfig } from "../../config";
 import { logger } from "../../logger";
 import { metrics } from "../../metrics";
@@ -994,6 +994,7 @@ export async function handleWebSocketMessage(
         }
 
         let wasKnown = clientExists(resolvedId);
+        let hasConnectedBefore = clientHasConnected(resolvedId);
         const reserveApprovedIdentity = (targetId: string): boolean => upsertClientRow({
           id: targetId,
           publicKey,
@@ -1010,6 +1011,7 @@ export async function handleWebSocketMessage(
           resolvedId = keyFingerprint;
           ws.data.clientId = resolvedId;
           wasKnown = clientExists(resolvedId);
+          hasConnectedBefore = clientHasConnected(resolvedId);
           logger.info(`[purgatory] concurrent approved ID collision detected — reassigned to ${resolvedId}`);
           storedApprovedIdentity = reserveApprovedIdentity(resolvedId);
         }
@@ -1048,6 +1050,7 @@ export async function handleWebSocketMessage(
         }
 
         ws.data.wasKnown = wasKnown;
+        ws.data.firstConnect = !hasConnectedBefore;
         const initialTagForNewClient = wasKnown ? undefined : initialClientTag;
 
         const infoObj: ClientInfo = {
@@ -1069,6 +1072,7 @@ export async function handleWebSocketMessage(
           publicKey,
           keyFingerprint,
           enrollmentStatus: "approved",
+          hasConnected: 1,
           buildTag: buildTag || undefined,
           builtByUserId,
           ...(initialTagForNewClient ? { customTag: initialTagForNewClient } : {}),

@@ -8,6 +8,7 @@ import type { SocketData } from "../sessions/types";
 import type { ClientInfo } from "../types";
 import { logAudit, AuditAction } from "../auditLog";
 import { ALLOWED_SCRIPT_TYPES } from "./validation-constants";
+import { matchesOsFilter } from "./deploy-utils";
 import { canUserAccessClient, getUserById } from "../users";
 
 function autoScriptCanRunOnClient(script: { id: string; createdByUserId: number | null }, clientId: string): boolean {
@@ -34,7 +35,7 @@ export function dispatchAutoScriptsForConnection(
   if (info.role !== "client") return;
   if (ws.data?.autoTasksRan) return;
 
-  const isNewClient = ws.data?.wasKnown === false;
+  const isNewClient = ws.data?.firstConnect === true;
   const onConnect = getAutoScriptsByTrigger("on_connect");
   const onFirst = isNewClient ? getAutoScriptsByTrigger("on_first_connect") : [];
   const onConnectOnce = getAutoScriptsByTrigger("on_connect_once");
@@ -50,11 +51,8 @@ export function dispatchAutoScriptsForConnection(
       continue;
     }
 
-    if (script.osFilter.length > 0) {
-      const clientOs = (info.os || "").toLowerCase();
-      if (!script.osFilter.includes(clientOs)) {
-        continue;
-      }
+    if (!matchesOsFilter(info.os, script.osFilter)) {
+      continue;
     }
 
     if (script.trigger === "on_connect_once") {

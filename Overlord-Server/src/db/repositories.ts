@@ -14,6 +14,7 @@ export type ClientDbRow = Omit<Partial<ClientInfo>, "online"> & {
   id: string;
   lastSeen?: number;
   online?: number;
+  hasConnected?: number;
 };
 
 export type OfflineStateUpdate = {
@@ -22,8 +23,8 @@ export type OfflineStateUpdate = {
   disconnectDetail?: string;
 };
 
-const UPSERT_CLIENT_ROW_SQL = `INSERT INTO clients (id, hwid, role, ip, host, os, arch, version, user, nickname, custom_tag, custom_tag_note, monitors, country, last_seen, online, ping_ms, build_tag, built_by_user_id, enrollment_status, public_key, key_fingerprint, cpu, gpu, ram, battery_percent, battery_charging, webcam_available, webcam_devices, is_admin, elevation, permissions)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, COALESCE(?, 0), ?, ?)
+const UPSERT_CLIENT_ROW_SQL = `INSERT INTO clients (id, hwid, role, ip, host, os, arch, version, user, nickname, custom_tag, custom_tag_note, monitors, country, last_seen, online, ping_ms, build_tag, built_by_user_id, enrollment_status, public_key, key_fingerprint, cpu, gpu, ram, battery_percent, battery_charging, webcam_available, webcam_devices, is_admin, elevation, permissions, has_connected)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, COALESCE(?, 0), ?, ?, COALESCE(?, 0))
      ON CONFLICT(id) DO UPDATE SET
        hwid=COALESCE(excluded.hwid, clients.hwid),
        role=COALESCE(excluded.role, clients.role),
@@ -55,7 +56,8 @@ const UPSERT_CLIENT_ROW_SQL = `INSERT INTO clients (id, hwid, role, ip, host, os
        webcam_devices=COALESCE(excluded.webcam_devices, clients.webcam_devices),
        is_admin=COALESCE(excluded.is_admin, clients.is_admin),
        elevation=COALESCE(excluded.elevation, clients.elevation),
-       permissions=COALESCE(excluded.permissions, clients.permissions)
+       permissions=COALESCE(excluded.permissions, clients.permissions),
+       has_connected=MAX(COALESCE(clients.has_connected, 0), COALESCE(excluded.has_connected, 0))
      WHERE
        excluded.public_key IS NULL
        OR clients.public_key = excluded.public_key
@@ -108,6 +110,7 @@ function upsertClientRowInternal(partial: ClientDbRow): boolean {
     partial.isAdmin !== undefined ? (partial.isAdmin ? 1 : 0) : null,
     partial.elevation ?? null,
     partial.permissions ? JSON.stringify(partial.permissions) : null,
+    partial.hasConnected ? 1 : 0,
   );
 
   return result.changes > 0;
@@ -1384,6 +1387,11 @@ export function recordAutoScriptRun(scriptId: string, clientId: string) {
 export function clientExists(id: string): boolean {
   const row = db.query<any>(`SELECT id FROM clients WHERE id=?`).get(id);
   return !!row?.id;
+}
+
+export function clientHasConnected(id: string): boolean {
+  const row = db.query<any>(`SELECT has_connected FROM clients WHERE id=?`).get(id);
+  return !!row?.has_connected;
 }
 
 export function getClientPublicKeyById(id: string): string | null {
