@@ -262,6 +262,33 @@ function renderPlugins(plugins) {
 
     let autoLoadBtn = null;
     if (!isServerOnly) {
+      const MODE_ORDER = ["always", "once", "first_connect"];
+      const MODE_LABELS = {
+        always: "Every connect",
+        once: "Once per client",
+        first_connect: "First connect only",
+      };
+      const currentMode = plugin.autoLoadMode || "always";
+      // Click cycles: off -> always -> once -> first_connect -> off
+      const next = !plugin.autoLoad
+        ? { autoLoad: true, mode: "always" }
+        : currentMode === "always"
+          ? { autoLoad: true, mode: "once" }
+          : currentMode === "once"
+            ? { autoLoad: true, mode: "first_connect" }
+            : { autoLoad: false, mode: "always" };
+      const postAutoLoad = async () => {
+        return fetch(`/api/plugins/${plugin.id}/autoload`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            autoLoad: next.autoLoad,
+            mode: next.mode,
+            autoStartEvents: plugin.autoStartEvents || [],
+          }),
+        });
+      };
+
       autoLoadBtn = document.createElement("button");
       const autoLoadDisabled = !plugin.enabled;
       autoLoadBtn.className =
@@ -272,37 +299,23 @@ function renderPlugins(plugins) {
             ? " border-amber-600 text-amber-200 bg-amber-900/40"
             : " border-slate-600 text-slate-300 bg-slate-800/60");
       autoLoadBtn.innerHTML = plugin.autoLoad
-        ? '<i class="fa-solid fa-bolt"></i> Auto-load'
+        ? `<i class="fa-solid fa-bolt"></i> Auto-load: ${MODE_LABELS[currentMode]}`
         : '<i class="fa-solid fa-bolt-lightning"></i> Auto-load off';
       autoLoadBtn.title = autoLoadDisabled
         ? "Plugin must be enabled before auto-load can be turned on"
         : plugin.autoLoad
-          ? "Plugin will auto-load on all new client connections. Click to disable."
-          : "Click to auto-load this plugin on all new client connections.";
+          ? `Auto-load mode: ${MODE_LABELS[currentMode]}. Click to switch mode (every connect → once per client → first connect only → off).`
+          : "Click to auto-load this plugin when clients connect. Click again to switch mode (every connect → once per client → first connect only → off).";
       if (autoLoadDisabled) {
         autoLoadBtn.disabled = true;
       } else {
         autoLoadBtn.addEventListener("click", async () => {
-          const res = await fetch(`/api/plugins/${plugin.id}/autoload`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              autoLoad: !plugin.autoLoad,
-              autoStartEvents: plugin.autoStartEvents || [],
-            }),
-          });
+          const res = await postAutoLoad();
           if (!res.ok) {
             const data = await res.json().catch(() => null);
             if (data && data.error === "needs_approval_required") {
               showNeedsApprovalModal(plugin, data.needs, data.needsHash, async () => {
-                await fetch(`/api/plugins/${plugin.id}/autoload`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    autoLoad: !plugin.autoLoad,
-                    autoStartEvents: plugin.autoStartEvents || [],
-                  }),
-                });
+                await postAutoLoad();
                 await refresh();
               });
               return;

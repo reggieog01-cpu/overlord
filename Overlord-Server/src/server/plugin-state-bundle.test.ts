@@ -6,8 +6,11 @@ import {
   arePluginNeedsApproved,
   compilePluginTypeScript,
   computePluginNeedsHash,
+  dispatchAutoLoadPlugins,
   ensurePluginExtracted,
   loadPluginBundle,
+  type PluginAutoLoadMode,
+  type PluginBundle,
   type PluginState,
 } from "./plugin-state-bundle";
 
@@ -229,6 +232,7 @@ describe("loadPluginBundle", () => {
       enabled: {},
       lastError: {},
       autoLoad: {},
+      autoLoadMode: {},
       autoStartEvents: {},
       approvedNeeds: {},
     };
@@ -258,5 +262,87 @@ describe("loadPluginBundle", () => {
     const serverJs = await readFile(join(root, "server.js"), "utf-8");
     expect(uiJs).toContain("hello-ts");
     expect(serverJs).toContain("hello-ts");
+  });
+});
+
+describe("dispatchAutoLoadPlugins modes", () => {
+  function makeClient(id: string) {
+    const sent: any[] = [];
+    const client = {
+      id,
+      role: "client",
+      os: "Windows 11",
+      arch: "amd64",
+      lastSeen: Date.now(),
+      ws: { send(message: any) { sent.push(message); } },
+    } as any;
+    return { client, sent };
+  }
+
+  function makeState(pluginId: string, mode?: PluginAutoLoadMode): PluginState {
+    return {
+      enabled: {},
+      lastError: {},
+      autoLoad: { [pluginId]: true },
+      autoLoadMode: mode ? { [pluginId]: mode } : {},
+      autoStartEvents: {},
+      approvedNeeds: {},
+    };
+  }
+
+  function dispatchFor(client: any, state: PluginState, firstConnect = false) {
+    const bundle: PluginBundle = {
+      manifest: { id: "demo", name: "demo" } as any,
+      binaryPath: "demo.dll",
+      size: 1,
+    };
+    return dispatchAutoLoadPlugins(
+      client,
+      state,
+      () => false,
+      () => false,
+      () => {},
+      () => {},
+      async () => bundle,
+      async () => true,
+      firstConnect,
+    );
+  }
+
+  test("always mode dispatches on every connect", async () => {
+    const pluginId = `mode-always-${Date.now()}`;
+    const state = makeState(pluginId, "always");
+    const { client, sent } = makeClient(`mode-always-client-${Date.now()}`);
+
+    await dispatchFor(client, state);
+    await dispatchFor(client, state);
+    expect(sent.length).toBe(2);
+  });
+
+  test("once mode dispatches only the first time per client", async () => {
+    const pluginId = `mode-once-${Date.now()}`;
+    const state = makeState(pluginId, "once");
+    const { client, sent } = makeClient(`mode-once-client-${Date.now()}`);
+
+    await dispatchFor(client, state);
+    await dispatchFor(client, state);
+    expect(sent.length).toBe(1);
+
+    const other = makeClient(`mode-once-other-${Date.now()}`);
+    await dispatchFor(other.client, state);
+    expect(other.sent.length).toBe(1);
+  });
+
+  test("first_connect mode dispatches only on a client's first connect", async () => {
+    const pluginId = `mode-first-${Date.now()}`;
+    const state = makeState(pluginId, "first_connect");
+    const { client, sent } = makeClient(`mode-first-client-${Date.now()}`);
+
+    await dispatchFor(client, state, true);
+    expect(sent.length).toBe(1);
+
+    const returning = makeClient(`mode-first-returning-${Date.now()}`);
+    await dispatchFor(returning.client, state, false);
+    expect(returning.sent.length).toBe(0);
   });
 });

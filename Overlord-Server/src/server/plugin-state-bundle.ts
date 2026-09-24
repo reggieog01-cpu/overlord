@@ -5,11 +5,15 @@ import { v4 as uuidv4 } from "uuid";
 import type { ClientInfo } from "../types";
 import type { PluginFileNeed, PluginManifest, PluginNeeds, PluginSignatureInfo } from "../protocol";
 import { LINUX_DISTRO_HINTS } from "./deploy-utils";
+import { hasPluginLoadRun, recordPluginLoadRun } from "../db";
+
+export type PluginAutoLoadMode = "always" | "once" | "first_connect";
 
 export type PluginState = {
   enabled: Record<string, boolean>;
   lastError: Record<string, string>;
   autoLoad: Record<string, boolean>;
+  autoLoadMode: Record<string, PluginAutoLoadMode>;
   autoStartEvents: Record<string, Array<{ event: string; payload: any }>>;
   approvedNeeds: Record<string, string>;
 };
@@ -25,11 +29,12 @@ export async function loadPluginStateFromDisk(pluginStatePath: string): Promise<
       enabled: parsed.enabled || {},
       lastError: parsed.lastError || {},
       autoLoad: parsed.autoLoad || {},
+      autoLoadMode: parsed.autoLoadMode || {},
       autoStartEvents: parsed.autoStartEvents || {},
       approvedNeeds: parsed.approvedNeeds || {},
     };
   } catch {
-    return { enabled: {}, lastError: {}, autoLoad: {}, autoStartEvents: {}, approvedNeeds: {} };
+    return { enabled: {}, lastError: {}, autoLoad: {}, autoLoadMode: {}, autoStartEvents: {}, approvedNeeds: {} };
   }
 }
 
@@ -484,12 +489,20 @@ export async function dispatchAutoLoadPlugins(
   enqueuePluginEvent: (clientId: string, pluginId: string, event: string, payload: any) => void,
   loadBundle: (pluginId: string, clientOS?: string, clientArch?: string) => Promise<PluginBundle>,
   needsApproved: (pluginId: string) => Promise<boolean> = async () => true,
+  firstConnect = false,
 ): Promise<void> {
   const autoLoadIds = Object.entries(pluginState.autoLoad)
     .filter(([id, enabled]) => enabled && pluginState.enabled[id] !== false)
     .map(([id]) => id);
 
   for (const pluginId of autoLoadIds) {
+    const mode = pluginState.autoLoadMode?.[pluginId] || "always";
+    if (mode === "first_connect" && !firstConnect) {
+      continue;
+    }
+    if (mode === "once" && hasPluginLoadRun(pluginId, client.id)) {
+      continue;
+    }
     if (isPluginLoaded(client.id, pluginId) || isPluginLoading(client.id, pluginId)) {
       continue;
     }
@@ -502,6 +515,9 @@ export async function dispatchAutoLoadPlugins(
       const bundle = await loadBundle(pluginId, client.os, client.arch);
       markPluginLoading(client.id, pluginId);
       sendPluginBundle(client, bundle);
+      if (mode === "once") {
+        recordPluginLoadRun(pluginId, client.id);
+      }
 
       const autoEvents = pluginState.autoStartEvents[pluginId];
       if (autoEvents && autoEvents.length > 0) {

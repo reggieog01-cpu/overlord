@@ -27,6 +27,7 @@ describe("plugin dashboard contribution authorization", () => {
         enabled: {},
         lastError: {},
         autoLoad: {},
+        autoLoadMode: {},
         autoStartEvents: {},
         approvedNeeds: {},
       },

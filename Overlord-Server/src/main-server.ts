@@ -289,7 +289,7 @@ const IS_DEVELOPMENT = String(process.env.NODE_ENV || "").trim().toLowerCase() =
 const pluginLoadedByClient = new Map<string, Set<string>>();
 const pendingPluginEvents = new Map<string, Array<{ event: string; payload: any }>>();
 const pluginLoadingByClient = new Map<string, Set<string>>();
-let pluginState = { enabled: {} as Record<string, boolean>, lastError: {} as Record<string, string>, autoLoad: {} as Record<string, boolean>, autoStartEvents: {} as Record<string, Array<{ event: string; payload: any }>>, approvedNeeds: {} as Record<string, string> };
+let pluginState = { enabled: {} as Record<string, boolean>, lastError: {} as Record<string, string>, autoLoad: {} as Record<string, boolean>, autoLoadMode: {} as Record<string, import("./server/plugin-state-bundle").PluginAutoLoadMode>, autoStartEvents: {} as Record<string, Array<{ event: string; payload: any }>>, approvedNeeds: {} as Record<string, string> };
 
 const savePluginState = () => savePluginStateToDisk(PLUGIN_ROOT, PLUGIN_STATE_PATH, pluginState);
 const loadPluginState = async () => {
@@ -654,7 +654,7 @@ async function startServer() {
     dispatchAutoDeploysForConnection: (info: import("./types").ClientInfo, ws: import("bun").ServerWebSocket<SocketData>) => {
       dispatchAutoDeploysForConnection(info, ws, { pendingCommandReplies });
     },
-    dispatchAutoLoadPlugins: (info: import("./types").ClientInfo) => {
+    dispatchAutoLoadPlugins: (info: import("./types").ClientInfo, opts?: { firstConnect?: boolean }) => {
       dispatchAutoLoadPlugins(
         info,
         pluginState,
@@ -669,6 +669,7 @@ async function startServer() {
           if (!manifest) return false;
           return arePluginNeedsApproved(pluginState, pluginId, manifest.needs);
         },
+        opts?.firstConnect === true,
       ).catch((err) => {
         logger.warn(`[plugin-autoload] dispatch error for ${info.id}: ${(err as Error).message}`);
       });

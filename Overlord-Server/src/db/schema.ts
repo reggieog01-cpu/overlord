@@ -520,6 +520,15 @@ db.run(
 );
 
 db.run(`
+  CREATE TABLE IF NOT EXISTS plugin_load_runs (
+    plugin_id TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    PRIMARY KEY (plugin_id, client_id)
+  );
+`);
+
+db.run(`
   CREATE TABLE IF NOT EXISTS auto_deploys (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
