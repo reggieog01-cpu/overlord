@@ -45,6 +45,26 @@ describe("loadPluginBundle", () => {
     expect(bundle.size).toBe("test-binary".length);
   });
 
+  test("matches plugin binaries when clients report a pretty Linux distro name", async () => {
+    const root = await createTempRoot();
+    const pluginDir = join(root, "sample-linux");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(
+      join(pluginDir, "manifest.json"),
+      JSON.stringify({
+        id: "sample-linux",
+        name: "sample-linux",
+        binaries: { "linux-amd64": "sample-linux-linux-amd64.so" },
+      }),
+    );
+    await writeFile(join(pluginDir, "sample-linux-linux-amd64.so"), "test-binary");
+
+    const bundle = await loadPluginBundle(root, "sample-linux", async () => {}, "Ubuntu 24.04 LTS", "amd64");
+
+    expect(bundle.binaryPath).toBe(join(pluginDir, "sample-linux-linux-amd64.so"));
+    expect(bundle.size).toBe("test-binary".length);
+  });
+
   test("rejects an extracted WASM manifest", async () => {
     const root = await createTempRoot();
     const pluginDir = join(root, "wasm-demo");

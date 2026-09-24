@@ -10,7 +10,7 @@ export function normalizeClientOs(os?: string): DeployOs {
 
 // Pretty OS names from /etc/os-release (e.g. "Ubuntu 24.04 LTS") often omit
 // the word "linux", so the family check alone misses most distros.
-const LINUX_DISTRO_HINTS = [
+export const LINUX_DISTRO_HINTS = [
   "ubuntu", "debian", "fedora", "centos", "rhel", "red hat", "arch",
   "manjaro", "mint", "suse", "alpine", "kali", "gentoo", "rocky",
   "alma", "oracle", "raspbian", "pop!_os", "pop os", "elementary",

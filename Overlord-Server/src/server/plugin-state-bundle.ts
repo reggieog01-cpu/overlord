@@ -4,6 +4,7 @@ import { createHash } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import type { ClientInfo } from "../types";
 import type { PluginFileNeed, PluginManifest, PluginNeeds, PluginSignatureInfo } from "../protocol";
+import { LINUX_DISTRO_HINTS } from "./deploy-utils";
 
 export type PluginState = {
   enabled: Record<string, boolean>;
@@ -398,7 +399,7 @@ function normalizePluginOS(value?: string): string {
   if (!os) return "unknown";
   if (os.includes("windows") || os === "win32") return "windows";
   if (os.includes("mac os") || os.includes("macos") || os.includes("os x") || os === "darwin") return "darwin";
-  if (os.includes("linux")) return "linux";
+  if (os.includes("linux") || LINUX_DISTRO_HINTS.some((hint) => os.includes(hint))) return "linux";
   if (os.includes("freebsd")) return "freebsd";
   return os;
 }
