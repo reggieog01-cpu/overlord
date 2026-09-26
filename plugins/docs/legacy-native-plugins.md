@@ -176,6 +176,8 @@ Go shared libraries cannot be fully unloaded safely because the Go runtime owns 
 
 Because Windows uses an in-memory PE loader, some runtime primitives that assume normal `LoadLibrary` initialization can be fragile. The Rust sample avoids `std::sync::Mutex` for this reason and uses C-style globals; the host serializes plugin calls.
 
+Rust plugins that must run under `nativeLoader: "memory"` should be built with emulated TLS (`-Ztls-model=emulated` plus `-Zbuild-std`, with an `__emutls_get_address` implementation in the crate). Compiler-emitted native TLS reads the TEB's `ThreadLocalStoragePointer` array (gs:[0x58]), which the in-memory loader cannot provision safely: `TlsSetValue` never populates that array, and ntdll rewrites its entries whenever a late-loaded DLL claims the same module-TLS index. With emulated TLS the plugin image has no TLS directory and every thread-local goes through ordinary Win32 `TlsAlloc`/`TlsGetValue`, which work under any loader. The xfill plugin (`plugins/xfill/native`) is the reference setup.
+
 ### Windows Loader Selection
 
 Set `nativeLoader` in `config.json`:

@@ -57,6 +57,15 @@ export const NAV_GROUPS = [
     ],
   },
   {
+    id: "xfill",
+    label: "xfill",
+    icon: "fa-database",
+    iconColor: "text-rose-400",
+    href: "/plugins/xfill",
+    linkId: "xfill-link",
+    alwaysVisible: true,
+  },
+  {
     id: "monitoring",
     label: "Monitoring",
     icon: "fa-chart-line",

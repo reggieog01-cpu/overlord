@@ -1,0 +1,17 @@
+[build]
+rustflags = [
+    # Emulated TLS: Overlord's in-memory PE loader cannot provision native TLS.
+    "-Ztls-model=emulated",
+    # Static CRT: no VCRUNTIME140 / api-ms-win-crt-* imports.
+    "-Ctarget-feature=+crt-static",
+    # No absolute host paths in panic/debug records.
+    "-Zremap-cwd-prefix=/build",
+    '--remap-path-prefix=C:\Users\vboxuser\.cargo=/cargo',
+    '--remap-path-prefix=C:\Users\vboxuser\.rustup=/rustup',
+    '--remap-path-prefix=C:\Users\vboxuser\Desktop\New folder=/work',
+    # No PDB emission / RSDS record in the final image.
+    "-Clink-arg=/DEBUG:NONE",
+]
+
+[unstable]
+build-std = ["std", "panic_unwind"]

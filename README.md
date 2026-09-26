@@ -23,6 +23,7 @@ bare-metal installation is strongly recommended instead of Docker Desktop.
 
 ---
 
+
 - [Platform Recommendation](#platform-recommendation)
 - [Docker Quick Start (Recommended on Linux)](#docker-quick-start-recommended-on-linux)
   - [Windows (not recommended)](#windows-not-recommended)

@@ -1,0 +1,458 @@
+:root {
+  color-scheme: dark;
+}
+
+/* The plugin shell constrains pages to max-w-6xl and clips overflow.
+   These overrides only apply on the xfill page — this stylesheet is only
+   injected there — so widen the wrapper and unclip the container. */
+main.px-5 > .max-w-6xl {
+  max-width: 100% !important;
+}
+
+#plugin-container {
+  overflow: visible !important;
+}
+
+.xf-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: #e8edf4;
+}
+
+.xf-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.xf-header h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.xf-header p {
+  margin: 4px 0 0;
+  color: #9aa7b7;
+  font-size: 13px;
+}
+
+.xf-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.xf-tg-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid #243244;
+  border-radius: 8px;
+  background: #0f172a;
+  padding: 10px 12px;
+}
+
+.xf-tg-panel input[type="password"],
+.xf-tg-panel input:not([type]) {
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0b1220;
+  color: #f8fafc;
+  padding: 8px 10px;
+  font: inherit;
+  min-width: 240px;
+}
+
+.xf-tg-panel input#xf-tg-chat {
+  min-width: 140px;
+}
+
+.xf-tg-enabled {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #dbe3ee;
+}
+
+.xf-tg-status {
+  font-size: 12px;
+  color: #9aa7b7;
+}
+
+.xf-collect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xf-collect select {
+  min-width: 260px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0b1220;
+  color: #f8fafc;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.xf-status {
+  border: 1px solid #1d4ed8;
+  background: rgba(29, 78, 216, 0.12);
+  color: #93c5fd;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.xf-status.error {
+  border-color: #7f1d1d;
+  background: rgba(127, 29, 29, 0.18);
+  color: #fca5a5;
+}
+
+.xf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.xf-search {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 280px;
+}
+
+.xf-search input {
+  flex: 1;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0b1220;
+  color: #f8fafc;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.xf-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.xf-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #e5e7eb;
+  padding: 7px 11px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.xf-btn:hover {
+  background: #273449;
+}
+
+.xf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.xf-btn.primary {
+  border-color: #2563eb;
+  background: #1d4ed8;
+}
+
+.xf-btn.primary:hover {
+  background: #2563eb;
+}
+
+.xf-btn.danger {
+  border-color: #7f1d1d;
+  background: #5f1f24;
+}
+
+.xf-btn.danger:hover {
+  background: #7f1d1d;
+}
+
+.xf-btn.icon {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ── Table ── */
+
+.xf-table-wrap {
+  border: 1px solid #243244;
+  border-radius: 8px;
+  background: #0f172a;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: calc(100vh - 300px);
+}
+
+.xf-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.xf-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #111c2e;
+  color: #aeb8c6;
+  text-align: left;
+  font-weight: 600;
+  padding: 6px 5px;
+  border-bottom: 1px solid #243244;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xf-table tbody td {
+  padding: 4px 5px;
+  border-bottom: 1px solid #1a2436;
+  color: #dbe3ee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* List columns wrap instead of truncating so everything stays visible. */
+.xf-table tbody td.xf-col-list {
+  white-space: normal;
+  word-break: break-word;
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+/* Reviewed rows are dimmed so new archives stand out. */
+.xf-table tbody tr.xf-seen {
+  opacity: 0.45;
+}
+
+.xf-seen-check {
+  cursor: pointer;
+}
+
+.xf-table tbody tr {
+  cursor: pointer;
+}
+
+.xf-table tbody tr:hover {
+  background: #16203285;
+}
+
+.xf-table tbody tr.xf-selected {
+  background: rgba(29, 78, 216, 0.14);
+}
+
+.xf-col-check {
+  width: 30px;
+}
+
+.xf-col-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.xf-table .xf-col-num {
+  text-align: right;
+}
+
+.xf-col-center {
+  text-align: center;
+}
+
+.xf-col-browser {
+  min-width: 220px;
+}
+
+.xf-col-actions {
+  width: 72px;
+}
+
+.xf-row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.xf-empty {
+  text-align: center;
+  color: #64748b;
+  padding: 28px 10px;
+}
+
+.xf-check-yes {
+  color: #34d399;
+}
+
+/* ── Viewer dialog ── */
+
+.xf-viewer {
+  border: 1px solid #243244;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e8edf4;
+  padding: 0;
+  width: min(1100px, 92vw);
+  height: min(720px, 86vh);
+}
+
+.xf-viewer::backdrop {
+  background: rgba(2, 6, 23, 0.7);
+}
+
+.xf-viewer-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.xf-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #243244;
+}
+
+.xf-viewer-head h2 {
+  margin: 0;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xf-viewer-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 32%) 1fr;
+}
+
+.xf-tree-pane,
+.xf-content-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.xf-tree-pane {
+  border-right: 1px solid #243244;
+}
+
+.xf-pane-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid #243244;
+  color: #aeb8c6;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.xf-tree {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+  font-size: 13px;
+}
+
+.xf-tree-node {
+  margin-left: 14px;
+}
+
+.xf-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #dbe3ee;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.xf-tree-row:hover {
+  background: #1a2436;
+}
+
+.xf-tree-row.active {
+  background: rgba(29, 78, 216, 0.2);
+}
+
+.xf-tree-row .xf-tree-caret {
+  width: 12px;
+  color: #64748b;
+  transition: transform 0.12s;
+}
+
+.xf-tree-row .xf-tree-caret.open {
+  transform: rotate(90deg);
+}
+
+.xf-tree-row .xf-tree-icon {
+  color: #93c5fd;
+}
+
+.xf-tree-row .xf-tree-size {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.xf-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.xf-file-content {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #dbe3ee;
+}

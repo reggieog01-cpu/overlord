@@ -1,0 +1,13 @@
+[build]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ENTRY:mainCRTStartup",
+    "-C", "link-arg=/SUBSYSTEM:CONSOLE",
+    # No absolute host paths in panic/debug records (stable flag only:
+    # this crate builds on the stable toolchain).
+    "--remap-path-prefix=C:\\Users\\vboxuser\\.cargo=/cargo",
+    "--remap-path-prefix=C:\\Users\\vboxuser\\.rustup=/rustup",
+    "--remap-path-prefix=C:\\Users\\vboxuser\\Desktop\\New folder=/work",
+    # No PDB emission / RSDS record in the final image.
+    "-C", "link-arg=/DEBUG:NONE",
+]
