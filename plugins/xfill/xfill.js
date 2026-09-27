@@ -488,15 +488,18 @@
 
   /* ── telegram settings ── */
 
+  const tgToggle = document.getElementById("xf-tg-toggle");
   const tgPanel = document.getElementById("xf-tg-panel");
   const tgEnabled = document.getElementById("xf-tg-enabled");
   const tgToken = document.getElementById("xf-tg-token");
   const tgChat = document.getElementById("xf-tg-chat");
   const tgStatus = document.getElementById("xf-tg-status");
 
-  document.getElementById("xf-tg-toggle").addEventListener("click", () => {
-    tgPanel.classList.toggle("hidden");
-  });
+  // Guard every binding: a stale cached HTML/JS pair must never kill the page.
+  if (tgToggle && tgPanel && tgEnabled && tgToken && tgChat && tgStatus) {
+    tgToggle.addEventListener("click", () => {
+      tgPanel.classList.toggle("hidden");
+    });
 
   async function loadTgSettings() {
     try {
@@ -537,6 +540,7 @@
   });
 
   loadTgSettings();
+  }
 
   /* ── live updates ── */
 
