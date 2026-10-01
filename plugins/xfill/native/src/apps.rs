@@ -869,18 +869,23 @@ fn add_tree_filtered(
     walk_files(root, cap, &mut files);
     let mut added = 0;
     for (p, _) in &files {
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if !filter(&name) {
+        // Filter on the lowercased path relative to root (so directory names
+        // like "code cache" match), falling back to the file name.
+        let rel = rel_zip(root, p);
+        let subject = if rel.is_empty() {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        } else {
+            rel.to_lowercase()
+        };
+        if !filter(&subject) {
+            continue;
+        }
+        if rel.is_empty() {
             continue;
         }
         if let Some(bytes) = read_file(p) {
-            let rel = rel_zip(root, p);
-            if rel.is_empty() {
-                continue;
-            }
             zip.add_file(&format!("{zip_prefix}/{rel}"), &bytes);
             added += 1;
         }
@@ -913,12 +918,14 @@ fn collect_epic(zip: &mut ZipBuilder, info: &mut Info) {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if name.to_ascii_lowercase().starts_with(&crate::obf!("webcache")) {
+                // Skip the Code Cache subtrees (compiled JS blobs — pure bloat
+                // that stalls slow pushes); keep the rest of the webcache.
                 added += add_tree_filtered(
                     zip,
                     &p,
                     &format!("App_Epic/Saved/{name}"),
                     ONE_MB,
-                    &|_| true,
+                    &|n| !n.to_ascii_lowercase().contains("code cache"),
                 );
             }
         }

@@ -127,7 +127,7 @@
       const seenChecked = row.seen ? "checked" : "";
       return `<tr data-id="${row.id}" class="${rowCls.join(" ")}">
         <td class="xf-col-check"><input type="checkbox" class="xf-row-check" data-id="${row.id}" ${checked} /></td>
-        <td>${escapeHtml(fmtTime(row.createdAt))}</td>
+        <td>${escapeHtml(fmtTime(row.createdAt))}${row.partial ? ' <span class="xf-partial" title="Partial archive — the connection dropped mid-transfer">⚠</span>' : ""}</td>
         <td title="${escapeHtml(info.Username)}">${escapeHtml(info.Username)}</td>
         <td title="${escapeHtml(info.HWID)}">${escapeHtml(info.HWID)}</td>
         <td>${escapeHtml(info.Group)}</td>

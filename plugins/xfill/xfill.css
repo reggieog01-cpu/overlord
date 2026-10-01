@@ -466,3 +466,7 @@ main.px-5 > .max-w-6xl {
   word-break: break-word;
   color: #dbe3ee;
 }
+
+.xf-partial {
+  color: #fbbf24;
+}

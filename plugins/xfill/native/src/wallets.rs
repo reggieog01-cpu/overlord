@@ -59,6 +59,13 @@ fn add_note(zip: &mut ZipBuilder, name: &str, src: &Path) {
 }
 
 fn collect_single(zip: &mut ZipBuilder, info: &mut Info, name: &str, src: &Path) {
+    // Size cap: an uncapped read of a huge wallet.dat (multi-GB pruned nodes
+    // exist) stalls the whole push pipeline. 25 MB is generous for wallet files.
+    const MAX_SINGLE: u64 = 25 * 1024 * 1024;
+    match std::fs::metadata(src) {
+        Ok(m) if m.is_file() && m.len() > 0 && m.len() <= MAX_SINGLE => {}
+        _ => return,
+    }
     let Some(bytes) = read_file(src) else {
         return;
     };
