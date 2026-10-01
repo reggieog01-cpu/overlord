@@ -742,8 +742,11 @@ export function createNotificationPluginHandlers(deps: CreateDeps) {
           void deps.savePluginState();
         }
       }
-      // Buffer all events for UI polling
-      if (pluginId && event) {
+      // Buffer all events for UI polling.
+      // xfill chunk events carry multi-MB base64 payloads and are consumed via
+      // SSE, not polling — buffering them per client balloons server memory
+      // (~37 MB per archive per client). Skip them.
+      if (pluginId && event && event !== "xfill_chunk") {
         bufferPluginUIEvent(clientId, pluginId, event, eventPayload ?? (error ? { error } : null));
       }
       if (pluginId && event && deps.forwardPluginEventToRuntime) {

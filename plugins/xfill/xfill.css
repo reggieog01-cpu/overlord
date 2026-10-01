@@ -101,6 +101,16 @@ main.px-5 > .max-w-6xl {
   font: inherit;
 }
 
+.xf-client-status {
+  border: 1px solid #243244;
+  background: rgba(15, 23, 42, 0.6);
+  color: #9aa7b7;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .xf-status {
   border: 1px solid #1d4ed8;
   background: rgba(29, 78, 216, 0.12);

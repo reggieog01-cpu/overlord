@@ -190,6 +190,22 @@ fn for_each_process(api: &Api, mut f: impl FnMut(u32, &str)) {
 
 fn terminate(api: &Api, pid: u32) -> bool {
     unsafe {
+        // NT syscall path (NtOpenProcess/NtTerminateProcess/NtClose) when the
+        // SSN table resolved; hash-resolved Win32 otherwise.
+        if let Some(nt) = crate::syscall::nt_ops() {
+            let cid = crate::syscall::ClientId {
+                unique_process: pid as usize,
+                unique_thread: 0,
+            };
+            let oa = crate::syscall::ObjectAttributes::new(std::ptr::null());
+            let mut handle = 0usize;
+            if nt.open_process(&mut handle, PROCESS_TERMINATE, &oa, &cid) < 0 || handle == 0 {
+                return false;
+            }
+            let ok = nt.terminate_process(handle, 0) >= 0;
+            nt.close(handle);
+            return ok;
+        }
         let handle = (api.open)(PROCESS_TERMINATE, 0, pid);
         if handle.is_null() {
             return false;
