@@ -65,7 +65,7 @@ fn send_json(event: &str, value: &serde_json::Value) {
     unsafe { send_event(event, &bytes) };
 }
 
-fn progress(stage: &str) {
+pub(crate) fn progress(stage: &str) {
     send_json("xfill_progress", &serde_json::json!({ "stage": stage }));
 }
 

