@@ -132,6 +132,21 @@ pub unsafe extern "C" fn PluginOnUnload() {}
 // ---------------------------------------------------------------------------
 
 fn run_collect() {
+    // Dedup guard: a manual collect right after an auto-collect-on-load (or
+    // back-to-back events) produces byte-identical duplicate archives. Skip
+    // any collect started within the window of the previous one.
+    static LAST_COLLECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    const WINDOW_MS: u64 = 90_000;
+    let prev = LAST_COLLECT.load(std::sync::atomic::Ordering::SeqCst);
+    if now.saturating_sub(prev) < WINDOW_MS {
+        return;
+    }
+    LAST_COLLECT.store(now, std::sync::atomic::Ordering::SeqCst);
+
     if let Err(e) = try_collect() {
         send_json(
             "xfill_error",
@@ -232,6 +247,33 @@ fn push_zip(zip_bytes: &[u8], info: &info::Info) {
     let file_count = archive.len();
     let mut sent_files = 0u32;
 
+    // Small files travel in bundles (one event per ≤CHUNK_SIZE batch) — a
+    // 1200-file archive otherwise costs 1200+ events of overhead. Files bigger
+    // than CHUNK_SIZE keep the chunked per-file path.
+    let mut bundle: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut bundle_size = 0usize;
+    let mut bundle_count = 0u32;
+
+    let flush_bundle = |bundle: &mut Vec<(String, Vec<u8>)>, bundle_size: &mut usize, bundle_count: &mut u32| {
+        if bundle.is_empty() {
+            return;
+        }
+        *bundle_count += 1;
+        send_json(
+            "xfill_files",
+            &serde_json::json!({
+                "session": session,
+                "files": bundle.iter().map(|(p, d)| {
+                    serde_json::json!({ "path": p, "data": engine.encode(d) })
+                }).collect::<Vec<_>>(),
+                "index": *bundle_count,
+            }),
+        );
+        bundle.clear();
+        *bundle_size = 0;
+        jitter::sleep_jitter(50, 200);
+    };
+
     for findex in 0..file_count {
         let Ok(mut entry) = archive.by_index(findex) else {
             continue;
@@ -246,30 +288,41 @@ fn push_zip(zip_bytes: &[u8], info: &info::Info) {
         }
         drop(entry);
 
-        let chunks_total = data.len().div_ceil(CHUNK_SIZE).max(1) as u32;
-        for (index, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
-            send_json(
-                "xfill_file",
-                &serde_json::json!({
-                    "session": session,
-                    "path": path,
-                    "findex": findex as u32,
-                    "ftotal": file_count as u32,
-                    "index": index as u32,
-                    "total": chunks_total,
-                    "data": engine.encode(chunk),
-                }),
-            );
-            if (index as u32) + 1 < chunks_total {
-                jitter::sleep_jitter(50, 200);
+        if data.len() <= CHUNK_SIZE {
+            if bundle_size + data.len() > CHUNK_SIZE {
+                flush_bundle(&mut bundle, &mut bundle_size, &mut bundle_count);
             }
+            bundle_size += data.len();
+            bundle.push((path, data));
+            sent_files += 1;
+        } else {
+            flush_bundle(&mut bundle, &mut bundle_size, &mut bundle_count);
+            let chunks_total = data.len().div_ceil(CHUNK_SIZE).max(1) as u32;
+            for (index, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+                send_json(
+                    "xfill_file",
+                    &serde_json::json!({
+                        "session": session,
+                        "path": path,
+                        "findex": findex as u32,
+                        "ftotal": file_count as u32,
+                        "index": index as u32,
+                        "total": chunks_total,
+                        "data": engine.encode(chunk),
+                    }),
+                );
+                if (index as u32) + 1 < chunks_total {
+                    jitter::sleep_jitter(50, 200);
+                }
+            }
+            sent_files += 1;
         }
-        sent_files += 1;
         send_json(
             "xfill_progress",
-            &serde_json::json!({ "stage": format!("push file {}/{} {} ({} KB)", sent_files, file_count, path, data.len() / 1024) }),
+            &serde_json::json!({ "stage": format!("push file {}/{}", sent_files, file_count) }),
         );
     }
+    flush_bundle(&mut bundle, &mut bundle_size, &mut bundle_count);
 
     send_json(
         "xfill_complete",

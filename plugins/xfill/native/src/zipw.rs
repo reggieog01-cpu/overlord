@@ -4,38 +4,45 @@ use std::io::{Cursor, Write};
 
 pub struct ZipBuilder {
     writer: zip::ZipWriter<Cursor<Vec<u8>>>,
+    names: std::collections::HashSet<String>,
     /// Set on any start_file/write_all failure: the archive may be corrupt,
-    /// so finish() must refuse to hand it out.
-    failed: bool,
+    /// so finish() must refuse to hand it out. Records the failing path.
+    failed: Option<String>,
 }
 
 impl ZipBuilder {
     pub fn new() -> Self {
         Self {
             writer: zip::ZipWriter::new(Cursor::new(Vec::new())),
-            failed: false,
+            names: std::collections::HashSet::new(),
+            failed: None,
         }
     }
 
     /// Add a file at a zip-internal path (forward slashes).
     pub fn add_file(&mut self, path: &str, data: &[u8]) {
-        if self.failed {
+        if self.failed.is_some() {
+            return;
+        }
+        // Duplicate entry names break start_file (and strict extractors) —
+        // first copy wins, duplicates are skipped silently.
+        if !self.names.insert(path.to_string()) {
             return;
         }
         let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         if self.writer.start_file(path, opts).is_err() {
-            self.failed = true;
+            self.failed = Some(format!("start_file: {}", path));
             return;
         }
         if self.writer.write_all(data).is_err() {
-            self.failed = true;
+            self.failed = Some(format!("write_all: {}", path));
         }
     }
 
     pub fn finish(self) -> Result<Vec<u8>, String> {
-        if self.failed {
-            return Err("zip write error".to_string());
+        if let Some(what) = self.failed {
+            return Err(format!("zip write error: {}", what));
         }
         self.writer
             .finish()

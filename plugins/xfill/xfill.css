@@ -470,3 +470,22 @@ main.px-5 > .max-w-6xl {
 .xf-partial {
   color: #fbbf24;
 }
+
+th.xf-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.xf-sortable:hover {
+  color: #dbe3ee;
+}
+
+th.xf-sort-asc::after {
+  content: " ▲";
+  color: #60a5fa;
+}
+
+th.xf-sort-desc::after {
+  content: " ▼";
+  color: #60a5fa;
+}

