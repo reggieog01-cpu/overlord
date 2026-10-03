@@ -133,6 +133,22 @@ fn window_matches_exe(hwnd: HWND, exe_name: &str) -> bool {
     }
 }
 
+/// Remove a window's taskbar button — the whole point of the virtual display
+/// is that the user never sees what we open, and by default Windows shows
+/// taskbar buttons for windows on every display (including ours). The window
+/// itself is untouched; only its taskbar entry disappears.
+fn hide_from_taskbar(hwnd: HWND) {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(tl) = CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER) {
+            let _ = tl.HrInit();
+            let _ = tl.DeleteTab(hwnd);
+        }
+    }
+}
+
 unsafe extern "system" fn move_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
     let ctx = &mut *(lparam.0 as *mut MoveCtx);
     if !IsWindowVisible(hwnd).as_bool() || !window_matches_exe(hwnd, &ctx.exe_name) {
@@ -152,6 +168,7 @@ unsafe extern "system" fn move_proc(hwnd: HWND, lparam: LPARAM) -> windows::core
         ctx.h,
         SWP_SHOWWINDOW,
     );
+    hide_from_taskbar(hwnd);
     ctx.moved += 1;
     true.into()
 }
