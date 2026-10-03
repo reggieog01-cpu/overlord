@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Virtual Monitor</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="vmon.css" />
+</head>
+<body>
+  <div class="vm-root">
+    <header class="vm-topbar">
+      <div class="vm-title">
+        <i class="fa-solid fa-display"></i>
+        <span>Virtual Monitor</span>
+        <span id="vm-client" class="vm-client"></span>
+      </div>
+      <div class="vm-stats">
+        <span id="vm-pill-status" class="vm-pill">idle</span>
+        <span id="vm-pill-fps" class="vm-pill">0 fps</span>
+        <span id="vm-pill-bw" class="vm-pill">0 kbps</span>
+      </div>
+    </header>
+
+    <div class="vm-toolbar">
+      <button id="vm-start" class="vm-btn primary"><i class="fa-solid fa-play"></i><span>Start</span></button>
+      <button id="vm-stop" class="vm-btn danger" disabled><i class="fa-solid fa-stop"></i><span>Stop</span></button>
+
+      <label class="vm-ctl">Res
+        <select id="vm-res">
+          <option value="1920x1080" selected>1920×1080</option>
+          <option value="1600x900">1600×900</option>
+          <option value="1366x768">1366×768</option>
+          <option value="1280x720">1280×720</option>
+        </select>
+      </label>
+      <label class="vm-ctl">FPS
+        <select id="vm-fps">
+          <option value="15">15</option>
+          <option value="30" selected>30</option>
+          <option value="60">60</option>
+        </select>
+      </label>
+      <label class="vm-ctl">Bitrate
+        <select id="vm-bitrate">
+          <option value="1500">1.5 Mbps</option>
+          <option value="3000">3 Mbps</option>
+          <option value="5000" selected>5 Mbps</option>
+          <option value="8000">8 Mbps</option>
+          <option value="12000">12 Mbps</option>
+        </select>
+      </label>
+
+      <span class="vm-sep"></span>
+
+      <select id="vm-apps" class="vm-apps"><option value="">Loading apps…</option></select>
+      <button id="vm-refresh-apps" class="vm-btn icon" title="Refresh app list"><i class="fa-solid fa-rotate"></i></button>
+      <button id="vm-launch" class="vm-btn"><i class="fa-solid fa-rocket"></i><span>Launch</span></button>
+      <input id="vm-custom-path" class="vm-path" placeholder="or path: C:\Program Files\..." spellcheck="false" />
+      <button id="vm-launch-custom" class="vm-btn icon" title="Launch path"><i class="fa-solid fa-play"></i></button>
+      <button id="vm-explorer" class="vm-btn icon" title="File Explorer"><i class="fa-solid fa-folder-open"></i></button>
+
+      <span class="vm-sep"></span>
+
+      <button id="vm-input-toggle" class="vm-btn toggle" title="Enable mouse/keyboard control"><i class="fa-solid fa-computer-mouse"></i><span>Input off</span></button>
+      <button id="vm-keyframe" class="vm-btn icon" title="Force keyframe"><i class="fa-solid fa-key"></i></button>
+      <button id="vm-fullscreen" class="vm-btn icon" title="Fullscreen"><i class="fa-solid fa-expand"></i></button>
+    </div>
+
+    <main class="vm-stage" id="vm-stage">
+      <canvas id="vm-canvas" width="1920" height="1080" tabindex="0"></canvas>
+      <div id="vm-overlay" class="vm-overlay">Press Start to attach the virtual display</div>
+      <div id="vm-log" class="vm-log"></div>
+    </main>
+  </div>
+  <script src="vmon.js"></script>
+</body>
+</html>
