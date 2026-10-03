@@ -369,26 +369,24 @@ pub fn ensure_display_at(width: u32, height: u32, far_x: i32, far_y: i32) -> Res
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
-    // The attach (either path) may come up with a stored database mode instead
-    // of ours — always re-assert mode + position via CDS now that the display
-    // is active (CDS works reliably on active displays).
+    // The attach (either path) may come up with a stored database mode. Try
+    // to set our mode via CDS (works on some drivers), then park the display
+    // top-adjacent via CCD - position-only, since IddCx rejects resolution
+    // changes on some builds, and Windows rejects non-adjacent "island"
+    // positions entirely (the physical cursor can only reach a top-adjacent
+    // display by pushing off the screen's top edge).
     {
-        let mut dm = DEVMODEW {
+        let dm = DEVMODEW {
             dmSize: size_of::<DEVMODEW>() as u16,
-            dmFields: DM_POSITION
-                | DM_PELSWIDTH
-                | DM_PELSHEIGHT
-                | DM_BITSPERPEL
-                | DM_DISPLAYFREQUENCY,
+            dmFields: DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY,
             dmPelsWidth: width,
             dmPelsHeight: height,
             dmBitsPerPel: 32,
             dmDisplayFrequency: 60,
             ..Default::default()
         };
-        dm.Anonymous1.Anonymous2.dmPosition = POINTL { x: far_x, y: far_y };
         let name_w = to_wide(&name);
-        let r = unsafe {
+        let _ = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(name_w.as_ptr()),
                 Some(&dm as *const DEVMODEW),
@@ -397,14 +395,27 @@ pub fn ensure_display_at(width: u32, height: u32, far_x: i32, far_y: i32) -> Res
                 None,
             )
         };
-        if r != windows::Win32::Graphics::Gdi::DISP_CHANGE_SUCCESSFUL {
-            // CDS is unreliable on IddCx devices on some builds — fix the
-            // mode/position through CCD instead.
-            let _ = ccd_set_mode(width, height, far_x, far_y);
-        }
+        // Read the display's ACTUAL current mode to compute the parking spot.
+        let mut cur = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        let ok = unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR(name_w.as_ptr()),
+                windows::Win32::Graphics::Gdi::ENUM_CURRENT_SETTINGS,
+                &mut cur,
+            )
+        };
+        let (px, py) = if ok.as_bool() && cur.dmPelsHeight > 0 {
+            (0, -(cur.dmPelsHeight as i32))
+        } else {
+            (0, -(height as i32))
+        };
+        let _ = ccd_set_position(px, py);
         std::thread::sleep(std::time::Duration::from_millis(800));
+        return Ok((name, px, py));
     }
-    Ok((name, far_x, far_y))
 }
 
 /// Detach the virtual display (zero-size mode removes it from the desktop
@@ -658,24 +669,27 @@ pub fn ccd_set_mode(width: u32, height: u32, far_x: i32, far_y: i32) -> Result<(
         paths.truncate(npaths2 as usize);
         modes.truncate(nmodes2 as usize);
 
-        // Identify the VDD path by its adapter LUID (root-enumerated device),
-        // never by index — path order is not guaranteed.
-        let mut luid_opt = None;
-        for _ in 0..10 {
-            luid_opt = vdd_adapter_luid();
-            if luid_opt.is_some() { break; }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        let Some(luid) = luid_opt else {
-            return Err("ccd_set_mode: VDD adapter not found".to_string());
-        };
+        // Identify the VDD path as the active path whose source is NOT at
+        // the primary's (0,0) - robust across adapter LUID changes and
+        // cross-adapter rendering on single-real-monitor machines.
         let mut target_idx = None;
-        for (i, p) in paths.iter().enumerate() {
-            if p.flags & DISPLAYCONFIG_PATH_ACTIVE != 0
-                && p.targetInfo.adapterId.LowPart == luid.LowPart
-                && p.targetInfo.adapterId.HighPart == luid.HighPart
-            {
-                target_idx = Some(i);
+        for (i2, p) in paths.iter().enumerate() {
+            if p.flags & DISPLAYCONFIG_PATH_ACTIVE == 0 {
+                continue;
+            }
+            // find this path's source mode position
+            let mut pos = (0i32, 0i32);
+            for m in modes.iter() {
+                if m.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+                    continue;
+                }
+                if m.adapterId.LowPart == p.sourceInfo.adapterId.LowPart {
+                    pos = (m.Anonymous.sourceMode.position.x, m.Anonymous.sourceMode.position.y);
+                    break;
+                }
+            }
+            if pos.0 != 0 || pos.1 != 0 {
+                target_idx = Some(i2);
                 break;
             }
         }
@@ -687,7 +701,7 @@ pub fn ccd_set_mode(width: u32, height: u32, far_x: i32, far_y: i32) -> Result<(
             if m.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
                 continue;
             }
-            if m.adapterId.LowPart != adapter.LowPart || m.adapterId.HighPart != adapter.HighPart
+            if m.adapterId.LowPart != adapter.LowPart
             {
                 continue;
             }
@@ -733,4 +747,68 @@ pub fn vdd_adapter_luid() -> Option<windows::Win32::Foundation::LUID> {
         }
     }
     None
+}
+
+/// Reposition the ACTIVE virtual display (position only — resolution changes
+/// are rejected by IddCx devices on some builds, positions are accepted).
+/// The target is the active path whose source is NOT at the primary's (0,0).
+pub fn ccd_set_position(x: i32, y: i32) -> Result<(), String> {
+    use windows::Win32::Devices::Display::{
+        GetDisplayConfigBufferSizes, QueryDisplayConfig, SetDisplayConfig, QDC_ONLY_ACTIVE_PATHS,
+        SDC_APPLY, SDC_USE_SUPPLIED_DISPLAY_CONFIG, DISPLAYCONFIG_MODE_INFO,
+        DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO,
+    };
+    use windows::Win32::Foundation::POINTL as PT;
+    const DISPLAYCONFIG_PATH_ACTIVE: u32 = 1;
+
+    unsafe {
+        let mut npaths = 0u32;
+        let mut nmodes = 0u32;
+        let r = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut npaths, &mut nmodes);
+        if r.0 != 0 {
+            return Err(format!("GetDisplayConfigBufferSizes: {:?}", r));
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); npaths as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nmodes as usize];
+        let mut npaths2 = npaths;
+        let mut nmodes2 = nmodes;
+        let r = QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut npaths2,
+            paths.as_mut_ptr(),
+            &mut nmodes2,
+            modes.as_mut_ptr(),
+            None,
+        );
+        if r.0 != 0 {
+            return Err(format!("QueryDisplayConfig: {:?}", r));
+        }
+        paths.truncate(npaths2 as usize);
+        modes.truncate(nmodes2 as usize);
+
+        let mut edited = false;
+        for m in modes.iter_mut() {
+            if m.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+                continue;
+            }
+            let pos = &mut m.Anonymous.sourceMode.position;
+            if pos.x == 0 && pos.y == 0 {
+                continue; // the primary
+            }
+            *pos = PT { x, y };
+            edited = true;
+        }
+        if !edited {
+            return Err("ccd_set_position: virtual path not found".to_string());
+        }
+        let r = SetDisplayConfig(
+            Some(&paths),
+            Some(&modes),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+        );
+        if r != 0 {
+            return Err(format!("SetDisplayConfig: {}", r));
+        }
+        Ok(())
+    }
 }
