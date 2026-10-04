@@ -248,7 +248,14 @@ pub fn ensure_driver() -> Result<(), String> {
     for (name, bytes) in DRIVER_FILES {
         std::fs::write(dir.join(name), bytes).map_err(|e| format!("write {}: {}", name, e))?;
     }
-    // Trust the publisher first — suppresses the interactive driver-trust
+    // Seed the driver mode table so the display comes up at a proper
+    // resolution instead of the 800x600 default.
+    let _ = std::fs::create_dir_all(r"C:\VirtualDisplayDriver");
+    let _ = std::fs::write(
+        r"C:\VirtualDisplayDriver\vdd_settings.xml",
+        include_bytes!("../driver/vdd_settings.xml"),
+    );
+    // Trust the publisher first - suppresses the interactive driver-trust
     // dialog so the install is silent on fresh machines.
     let cert = dir.join("publisher.cer");
     std::fs::write(&cert, PUBLISHER_CERT).map_err(|e| format!("write cert: {}", e))?;
@@ -259,11 +266,11 @@ pub fn ensure_driver() -> Result<(), String> {
     );
     let inf = dir.join("MttVDD.inf");
     let inf_str = inf.to_string_lossy().into_owned();
-    run_hidden(
+    let _ = run_hidden(
         "pnputil",
         &format!("/add-driver \"{}\" /install", inf_str),
         60_000,
-    )?;
+    );
     // Device creation can lag pnputil by a moment.
     for _ in 0..6 {
         if find_virtual_display().is_some() {
@@ -271,16 +278,28 @@ pub fn ensure_driver() -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    // pnputil only stages the package — devcon creates the node AND runs the
-    // full DIFx install (including the WDF/UMDF service registration that
-    // hand-rolled SetupAPI misses).
+    // pnputil only stages the package - devcon creates the node AND runs
+    // the full DIFx install (including the WDF/UMDF service registration).
+    // Poll generously: slow boxes can take half a minute to enumerate the
+    // new device, and a rescan nudges it along.
     let devcon = dir.join("devcon.exe");
-    run_hidden(
+    let _ = run_hidden(
         &devcon.to_string_lossy(),
         &format!("install \"{}\" Root\\MttVDD", inf_str),
         120_000,
-    )?;
-    for _ in 0..20 {
+    );
+    for i in 0..60 {
+        if find_virtual_display().is_some() {
+            return Ok(());
+        }
+        if i == 20 {
+            let _ = run_hidden("pnputil", "/scan-devices", 30_000);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // Last resort: create the node via SetupAPI and bind the driver directly.
+    let _ = create_device_node(&inf_str);
+    for _ in 0..30 {
         if find_virtual_display().is_some() {
             return Ok(());
         }

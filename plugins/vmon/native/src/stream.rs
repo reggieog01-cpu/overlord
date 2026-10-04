@@ -195,7 +195,9 @@ fn run_inner(cfg: StreamConfig, cmd_rx: Receiver<Command>, target: Option<String
 // ---------------------------------------------------------------------------
 
 struct Duplication {
+    device: ID3D11Device,
     context: ID3D11DeviceContext,
+    output: IDXGIOutput,
     dup: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
     // GPU color-conversion path (None when the adapter lacks video support —
@@ -209,7 +211,7 @@ struct Duplication {
     width: u32,
     height: u32,
     // Actual output size before even-rounding (frames from duplication come
-    // in at this size; NV12 buffers are width×height).
+    // in at this size; NV12 buffers are width?-height).
     real_w: u32,
     real_h: u32,
     // Actual desktop position of the output — input translation and window
@@ -249,6 +251,32 @@ impl Duplication {
                         adapter_out = Some(adapter.clone());
                         output_out = Some(output);
                         break 'outer;
+                    }
+                }
+            }
+            // Fallback: no name/coord match - take the attached output whose
+            // ADAPTER description marks it as the virtual/indirect display.
+            if output_out.is_none() {
+                'outer2: for ai in 0..16 {
+                    let Ok(adapter) = dxgi.EnumAdapters1(ai) else { break };
+                    let adesc = adapter.GetDesc1().map_err(|e| e.to_string())?;
+                    let dlen = adesc
+                        .Description
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(adesc.Description.len());
+                    let adname = String::from_utf16_lossy(&adesc.Description[..dlen]).to_lowercase();
+                    if !(adname.contains("virtual") || adname.contains("mttvdd") || adname.contains("indirect")) {
+                        continue;
+                    }
+                    for oi in 0..16 {
+                        let Ok(output) = adapter.EnumOutputs(oi) else { break };
+                        let desc = output.GetDesc().map_err(|e| e.to_string())?;
+                        if desc.AttachedToDesktop.as_bool() {
+                            adapter_out = Some(adapter.clone());
+                            output_out = Some(output);
+                            break 'outer2;
+                        }
                     }
                 }
             }
@@ -390,7 +418,9 @@ impl Duplication {
             }
 
             Ok(Self {
+                device,
                 context,
+                output,
                 dup,
                 staging,
                 vp,
@@ -424,7 +454,16 @@ impl Duplication {
                         return Ok(None);
                     }
                     if hr == DXGI_ERROR_ACCESS_LOST {
-                        return Err("access lost".to_string());
+                        // Display topology changed - recreate the duplication
+                        // on the same output instead of dying.
+                        let output1: IDXGIOutput1 = self
+                            .output
+                            .cast()
+                            .map_err(|e| e.to_string())?;
+                        self.dup = output1
+                            .DuplicateOutput(&self.device)
+                            .map_err(|e| format!("re-duplication after access lost: {}", e))?;
+                        return Ok(None);
                     }
                     return Err(format!("AcquireNextFrame: {}", e));
                 }
@@ -524,7 +563,7 @@ impl Duplication {
             }
 
             // CPU path: read back raw BGRA, convert to NV12 on CPU. The frame
-            // is real_w×real_h; buffers are even-sized, so clamp reads.
+            // is real_w?-real_h; buffers are even-sized, so clamp reads.
             let staging_bgra = self.staging_bgra.clone().ok_or("no bgra staging")?;
             self.context.CopyResource(&staging_bgra, &frame_tex);
             let _ = self.dup.ReleaseFrame();
