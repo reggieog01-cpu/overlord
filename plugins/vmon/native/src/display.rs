@@ -327,8 +327,10 @@ pub fn ensure_display_at(width: u32, height: u32, far_x: i32, far_y: i32) -> Res
     if !active {
         // CCD first: builds/activates the path in the display database, which
         // works even when Windows refuses the plain CDS attach. On failure
-        // fall back to the CDS retry loop.
-        if ccd_attach(width, height, far_x, far_y).is_err() {
+        // fall back to the CDS retry loop. Keep the CCD error message -
+        // it is the more informative of the two failure paths.
+        let ccd_err = ccd_attach(width, height, far_x, far_y);
+        if let Err(ccd_msg) = ccd_err {
             // The IddCx driver needs a moment after device start before its
             // adapter accepts mode sets — retry the attach for up to ~30s.
             let mut attached = false;
@@ -389,7 +391,7 @@ pub fn ensure_display_at(width: u32, height: u32, far_x: i32, far_y: i32) -> Res
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
         if !attached {
-            return Err(format!("ChangeDisplaySettingsExW failed: {:?}", last_r));
+            return Err(format!("ccd: {} | cds: {:?}", ccd_msg, last_r));
         }
         }
         std::thread::sleep(std::time::Duration::from_millis(1500));
