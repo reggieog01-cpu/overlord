@@ -6,6 +6,7 @@ import type { FeatureName, UserRole } from "../../users";
 import { hasPermission, requireClientAccess, requireFeatureAccess } from "../../rbac";
 import type { SocketRole } from "../../sessions/types";
 import { isSameOriginBrowserRequest } from "../request-origin";
+import { consumeAgentToken } from "../ws-vmon";
 
 type RequestServer = {
   requestIP: (req: Request) => { address?: string } | null | undefined;
@@ -284,6 +285,43 @@ export async function handleWsUpgradeRoutes(
       return new Response("Forbidden", { status: 403 });
     }
     return upgradeOrFail(req, server, { role, clientId, ip });
+  }
+
+  // vmon side-channel: the agent-side DLL authenticates with a one-time token
+  // minted by the panel, not the agent credential.
+  if (url.pathname === "/api/plugins/vmon/agent-ws" && req.method === "GET") {
+    const token = url.searchParams.get("token") || "";
+    const clientId = token ? consumeAgentToken(token) : null;
+    if (!clientId) return new Response("Unauthorized", { status: 401 });
+    return upgradeOrFail(req, server, { role: "vmon_agent", clientId, ip });
+  }
+
+  // vmon side-channel viewer (panel). Same access gate as backstage.
+  const vmonViewerMatch = url.pathname.match(/^\/api\/plugins\/vmon\/viewer-ws$/);
+  if (vmonViewerMatch && req.method === "GET") {
+    if (!isSameOriginBrowserRequest(req, url, { requireOrigin: true })) {
+      return new Response("Forbidden: invalid WebSocket origin", { status: 403 });
+    }
+    const user = await authenticateViewerRequest(req);
+    if (user instanceof Response) return user;
+    if (user.role === "viewer") {
+      return new Response("Forbidden: Viewers cannot access interactive features", { status: 403 });
+    }
+    const clientId = url.searchParams.get("clientId") || "";
+    if (!clientId) return new Response("Bad request", { status: 400 });
+    const denied = checkOperatorAccess(user, clientId, "backstage");
+    if (denied) return denied;
+    const data: Record<string, unknown> = {
+      role: "vmon_viewer",
+      clientId,
+      ip: getRequestIp(req, server),
+      userRole: user.role,
+      userId: user.userId,
+      username: user.username,
+    };
+    const token = extractTokenFromRequest(req);
+    if (token) data.authTokenHash = hashTokenForSession(token);
+    return upgradeOrFail(req, server, data);
   }
 
   const clientViewerResponse = await tryClientViewerUpgrade(req, url, server);

@@ -34,12 +34,11 @@
     return res.json().catch(() => ({}));
   }
 
-  /* ── H.264 decode (WebCodecs) ── */
+  /* ── H.264 decode (WebCodecs, annexb) ── */
 
   let decoder = null;
   let decodedW = 0, decodedH = 0;
 
-  // Parse SPS NAL from an annexb sequence header to build the codec string.
   function codecFromSeqhdr(bytes) {
     for (let i = 0; i + 4 < bytes.length; i++) {
       const sc3 = bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1;
@@ -48,12 +47,11 @@
       const nalStart = i + (sc4 ? 4 : 3);
       const nalType = bytes[nalStart] & 0x1f;
       if (nalType === 7 && nalStart + 3 < bytes.length) {
-        const p = bytes[nalStart + 1], c = bytes[nalStart + 2], l = bytes[nalStart + 3];
         const hex = (b) => b.toString(16).padStart(2, "0").toUpperCase();
-        return `avc1.${hex(p)}${hex(c)}${hex(l)}`;
+        return `avc1.${hex(bytes[nalStart + 1])}${hex(bytes[nalStart + 2])}${hex(bytes[nalStart + 3])}`;
       }
     }
-    return "avc1.640028"; // High 4.0 fallback
+    return "avc1.640028";
   }
 
   function initDecoder(seqhdrB64, w, h) {
@@ -71,38 +69,59 @@
         ctx2d.drawImage(frame, 0, 0);
         frame.close();
         framesRendered++;
-        // First decoded frame: hide the overlay regardless of how we got here
-        // (stream may have started before the page loaded).
         if (!overlay.classList.contains("hidden")) overlay.classList.add("hidden");
       },
       error: (e) => log(`decoder: ${e.message}`),
     });
     const tryConfigure = (config) => {
-      try {
-        decoder.configure(config);
-        return true;
-      } catch {
-        return false;
-      }
+      try { decoder.configure(config); return true; } catch { return false; }
     };
-    // Let the browser pick the decode backend — hardwareAcceleration hints
-    // fail configure() outright on machines without a GPU.
     if (!tryConfigure({ codec, format: "annexb" })
         && !tryConfigure({ codec })
         && !tryConfigure({ codec: "avc1.640028", format: "annexb" })) {
       log(`decoder: cannot configure for ${codec}`);
       return;
     }
-    // Feed SPS/PPS as a config chunk.
     decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data: bytes }));
     log(`decoder: configured ${w}x${h} (${codec})`);
   }
 
-  /* ── stream (SSE) ── */
+  /* ── side-channel viewer WS (binary frames) ── */
 
   let framesRendered = 0;
   let bytesIn = 0;
+  let viewerWs = null;
   let streaming = false;
+
+  function connectViewerWs() {
+    if (viewerWs && viewerWs.readyState <= WebSocket.OPEN) return;
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/api/plugins/${PLUGIN_ID}/viewer-ws?clientId=${encodeURIComponent(clientId)}`);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => log("viewer ws: connected");
+    ws.onclose = () => {
+      viewerWs = null;
+      if (streaming) setTimeout(connectViewerWs, 2000);
+    };
+    ws.onerror = () => {};
+    ws.onmessage = (e) => {
+      if (typeof e.data === "string") return;
+      const buf = new Uint8Array(e.data);
+      if (buf.length < 8 || buf[0] !== 0x46 || buf[1] !== 0x52 || buf[2] !== 0x4d) return;
+      const metaLen = buf[3] === 2 ? 12 : 8;
+      const format = buf[6];
+      if (format !== 4 || !decoder || decoder.state !== "configured") return;
+      const data = buf.subarray(metaLen);
+      bytesIn += data.length;
+      if (decoder.decodeQueueSize > 6 && data[0] !== 1) return; // drop deltas, never keyframes
+      // Frame format: [key:u8][annexb access unit]
+      const isKey = data[0] === 1;
+      decoder.decode(new EncodedVideoChunk({ type: isKey ? "key" : "delta", timestamp: 0, data: data.subarray(1) }));
+    };
+    viewerWs = ws;
+  }
+
+  /* ── SSE (status + config only) ── */
 
   const source = new EventSource(`/api/plugins/${PLUGIN_ID}/stream`);
   const mine = (d) => d && d.clientId === clientId;
@@ -115,17 +134,17 @@
       log(`status: ${stage}${d.message ? " — " + d.message : ""}`);
       if (stage === "streaming") {
         streaming = true;
-        setStatus("live", "live");
-        overlay.classList.add("hidden");
+        setStatus("Live", "live");
         $("vm-start").disabled = true;
         $("vm-stop").disabled = false;
+        connectViewerWs();
       } else if (stage === "error") {
-        setStatus("error", "error");
+        setStatus("Error", "error");
         $("vm-start").disabled = false;
         $("vm-stop").disabled = true;
       } else if (stage === "stopped") {
         streaming = false;
-        setStatus("stopped", "");
+        setStatus("Stopped", "");
         overlay.classList.remove("hidden");
         overlay.textContent = "Stream stopped";
         $("vm-start").disabled = false;
@@ -144,58 +163,42 @@
     } catch {}
   });
 
-  source.addEventListener("vmon_frame", (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      if (!mine(d) || !decoder || decoder.state !== "configured") return;
-      const bytes = Uint8Array.from(atob(d.data), (c) => c.charCodeAt(0));
-      bytesIn += bytes.length;
-      // Drop delta frames when the decoder is behind; never drop keyframes.
-      if (decoder.decodeQueueSize > 4 && !d.key) return;
-      decoder.decode(
-        new EncodedVideoChunk({
-          type: d.key ? "key" : "delta",
-          timestamp: (d.ts || 0) * 1000,
-          data: bytes,
-        }),
-      );
-    } catch {}
-  });
-
-  source.addEventListener("vmon_apps", (e) => {
+  source.addEventListener("vmon_browsers", (e) => {
     try {
       const d = JSON.parse(e.data);
       if (!mine(d)) return;
-      const sel = $("vm-apps");
-      sel.innerHTML = '<option value="">Select app…</option>';
-      for (const app of d.apps || []) {
-        const opt = document.createElement("option");
-        opt.value = app.path;
-        opt.textContent = app.name;
-        sel.appendChild(opt);
-      }
-      log(`apps: ${(d.apps || []).length} found`);
+      renderBrowsers(d.browsers || []);
     } catch {}
   });
 
-  source.onerror = () => setStatus("stream error", "error");
-
   /* ── stats ── */
   setInterval(() => {
-    $("vm-pill-fps").textContent = `${framesRendered} fps`;
-    $("vm-pill-bw").textContent = `${Math.round((bytesIn * 8) / 1000)} kbps`;
+    $("vm-stat-fps").textContent = framesRendered || "--";
+    $("vm-stat-net").textContent = bytesIn ? `${Math.round((bytesIn * 8) / 1000)} kbps` : "--";
     framesRendered = 0;
     bytesIn = 0;
   }, 1000);
 
-  /* ── controls ── */
+  /* ── start / stop ── */
 
   $("vm-start").addEventListener("click", async () => {
     const [w, h] = $("vm-res").value.split("x").map(Number);
     setStatus("starting…", "");
     overlay.textContent = "Starting virtual display…";
+    overlay.classList.remove("hidden");
     try {
+      // Mint the side-channel token first, then tell the DLL where to connect.
+      const tokRes = await fetch(`/api/plugins/${PLUGIN_ID}/agent-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId }),
+      });
+      if (!tokRes.ok) throw new Error(`agent-token: HTTP ${tokRes.status}`);
+      const { token } = await tokRes.json();
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const wsUrl = `${proto}://${location.host}/api/plugins/${PLUGIN_ID}/agent-ws?token=${encodeURIComponent(token)}`;
       await sendEvent("start", {
+        ws_url: wsUrl,
         width: w,
         height: h,
         fps: Number($("vm-fps").value),
@@ -209,29 +212,12 @@
 
   $("vm-stop").addEventListener("click", async () => {
     await sendEvent("stop").catch(() => {});
-  });
-
-  $("vm-keyframe").addEventListener("click", () => sendEvent("keyframe").catch(() => {}));
-
-  $("vm-refresh-apps").addEventListener("click", () => {
-    $("vm-apps").innerHTML = "<option value=''>Loading…</option>";
-    sendEvent("list_apps").catch((e) => log(String(e)));
-  });
-
-  $("vm-launch").addEventListener("click", () => {
-    const path = $("vm-apps").value;
-    if (!path) return;
-    sendEvent("launch", { path }).catch((e) => log(String(e)));
-  });
-
-  $("vm-launch-custom").addEventListener("click", () => {
-    const path = $("vm-custom-path").value.trim();
-    if (!path) return;
-    sendEvent("launch", { path }).catch((e) => log(String(e)));
-  });
-
-  $("vm-explorer").addEventListener("click", () => {
-    sendEvent("launch", { path: "C:\\Windows\\explorer.exe" }).catch((e) => log(String(e)));
+    if (viewerWs) {
+      const ws = viewerWs;
+      viewerWs = null;
+      streaming = false;
+      ws.close();
+    }
   });
 
   $("vm-fullscreen").addEventListener("click", () => {
@@ -240,14 +226,47 @@
     else stage.requestFullscreen().catch(() => {});
   });
 
+  /* ── launcher ── */
+
+  function launchPath(path) {
+    sendEvent("launch", { path }).then(() => log(`launched: ${path}`)).catch((e) => log(String(e)));
+  }
+
+  function renderBrowsers(browsers) {
+    const chromium = browsers.filter((b) => b.family === "chromium");
+    const firefox = browsers.filter((b) => b.family === "firefox");
+    const fill = (el, list) => {
+      el.innerHTML = "";
+      if (list.length === 0) {
+        el.innerHTML = '<div class="vm-item muted">none found</div>';
+        return;
+      }
+      for (const b of list) {
+        const div = document.createElement("div");
+        div.className = "vm-item" + (b.found ? "" : " notfound");
+        div.innerHTML = `<i class="fa-solid fa-globe"></i> ${b.name}${b.found ? '<i class="fa-solid fa-circle found-dot"></i>' : " (not found)"}`;
+        if (b.found) div.addEventListener("click", () => launchPath(b.path));
+        el.appendChild(div);
+      }
+    };
+    fill($("vm-chromium-list"), chromium);
+    fill($("vm-firefox-list"), firefox);
+  }
+
+  document.querySelectorAll(".vm-item[data-exe]").forEach((el) => {
+    el.addEventListener("click", () => launchPath(el.dataset.exe));
+  });
+  $("vm-launch-custom").addEventListener("click", () => {
+    const p = $("vm-custom-path").value.trim();
+    if (p) launchPath(p);
+  });
+  $("vm-explorer").addEventListener("click", () => launchPath("C:\\Windows\\explorer.exe"));
+
   /* ── input ── */
 
   let inputEnabled = false;
-  $("vm-input-toggle").addEventListener("click", () => {
-    inputEnabled = !inputEnabled;
-    const btn = $("vm-input-toggle");
-    btn.classList.toggle("on", inputEnabled);
-    btn.querySelector("span").textContent = inputEnabled ? "Input on" : "Input off";
+  $("vm-input-toggle").addEventListener("change", (e) => {
+    inputEnabled = e.target.checked;
     if (inputEnabled) canvas.focus();
   });
 
@@ -314,11 +333,10 @@
     }
   });
 
-  // Boot: fetch app list once the plugin is reachable, then ask for a
-  // keyframe + config replay so a stream already in progress shows up.
+  /* ── boot ── */
   if (clientId) {
     sendEvent("ping")
-      .then(() => sendEvent("list_apps"))
+      .then(() => sendEvent("browser_check"))
       .then(() => sendEvent("keyframe"))
       .catch((err) => {
         setStatus("unreachable", "error");

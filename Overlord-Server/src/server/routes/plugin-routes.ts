@@ -20,6 +20,7 @@ import { arePluginNeedsApproved, computePluginNeedsHash, getPluginPull, deletePl
 import { isAuthorizedAgentRequest } from "../agent-auth";
 import { hasPluginLoadRun, recordPluginLoadRun } from "../../db";
 import { logger } from "../../logger";
+import { issueAgentToken } from "../ws-vmon";
 
 type PluginManifest = ProtocolPluginManifest & {
   signature?: PluginSignatureInfo;
@@ -86,6 +87,26 @@ export async function handlePluginRoutes(
     !url.pathname.match(/^\/api\/clients\/.+\/plugins/)
   ) {
     return null;
+  }
+
+  // vmon side-channel: mint a one-time token the agent-side DLL will use to
+  // open its binary frame WebSocket. Panel-authenticated, client-scoped.
+  if (req.method === "POST" && url.pathname === "/api/plugins/vmon/agent-token") {
+    const user = await authenticateRequest(req);
+    if (!user) return new Response("Unauthorized", { status: 401 });
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {}
+    const clientId = String(body?.clientId || "");
+    if (!clientId) return new Response("Bad request", { status: 400 });
+    try {
+      requireClientAccess(user, clientId);
+    } catch (error) {
+      if (error instanceof Response) return error;
+      return new Response("Forbidden", { status: 403 });
+    }
+    return Response.json({ ok: true, token: issueAgentToken(clientId), clientId });
   }
 
   async function loadManifest(pluginId: string): Promise<PluginManifest> {

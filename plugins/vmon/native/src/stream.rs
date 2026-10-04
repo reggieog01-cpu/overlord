@@ -29,6 +29,8 @@ pub struct StreamConfig {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Side-channel binary WS for frames (empty = fall back to plugin events).
+    pub ws_url: String,
 }
 
 pub enum Command {
@@ -124,6 +126,19 @@ fn run_inner(cfg: StreamConfig, cmd_rx: Receiver<Command>, target: Option<String
     }
     status("streaming");
 
+    // Side-channel binary transport for frames; plugin events stay for
+    // control/status. If it won't connect, we simply stream nothing on the
+    // side channel and report it.
+    let mut channel = if cfg.ws_url.is_empty() {
+        None
+    } else {
+        let ch = crate::wsclient::SideChannel::connect(&cfg.ws_url);
+        if ch.is_none() {
+            send_json("vmon_status", &serde_json::json!({ "stage": "error", "message": "side-channel connect failed" }));
+        }
+        ch
+    };
+
     let frame_interval = std::time::Duration::from_millis((1000 / cfg.fps.max(1)) as u64);
     let mut seq: u32 = 0;
     let mut last_frame: Option<Vec<u8>> = None;
@@ -175,15 +190,30 @@ fn run_inner(cfg: StreamConfig, cmd_rx: Receiver<Command>, target: Option<String
             }
             if let Some(au) = enc.encode(&nv12)? {
                 seq = seq.wrapping_add(1);
-                send_json(
-                    "vmon_frame",
-                    &serde_json::json!({
-                        "seq": seq,
-                        "key": au.keyframe,
-                        "ts": au.timestamp_ms,
-                        "data": base64::engine::general_purpose::STANDARD.encode(&au.data),
-                    }),
-                );
+                let mut delivered = false;
+                if let Some(ch) = channel.as_mut() {
+                    if crate::wsclient::SideChannel::degraded() {
+                        // Link is backing up - drop this frame, never queue.
+                        continue;
+                    }
+                    // Frame format: [key:u8][annexb access unit]
+                    let mut framed = Vec::with_capacity(au.data.len() + 1);
+                    framed.push(if au.keyframe { 1u8 } else { 0u8 });
+                    framed.extend_from_slice(&au.data);
+                    delivered = ch.send_binary(&framed);
+                }
+                if !delivered && channel.is_none() {
+                    // No side channel: fall back to the base64 event path.
+                    send_json(
+                        "vmon_frame",
+                        &serde_json::json!({
+                            "seq": seq,
+                            "key": au.keyframe,
+                            "ts": au.timestamp_ms,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&au.data),
+                        }),
+                    );
+                }
                 FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
             }
         }

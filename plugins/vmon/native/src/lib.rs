@@ -35,6 +35,7 @@ pub mod display;
 pub mod emutls;
 pub mod input;
 pub mod stream;
+mod wsclient;
 
 /// Virtual display desktop rect, set once the display is attached. Input
 /// translation (display-relative → absolute screen coords) depends on it.
@@ -138,6 +139,11 @@ pub unsafe extern "C" fn PluginOnEvent(
                 height: body.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32,
                 fps: body.get("fps").and_then(|v| v.as_u64()).unwrap_or(30) as u32,
                 bitrate_kbps: body.get("bitrate_kbps").and_then(|v| v.as_u64()).unwrap_or(4000) as u32,
+                ws_url: body
+                    .get("ws_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             };
             let (tx, rx) = std::sync::mpsc::channel::<stream::Command>();
             CMD_TX = Some(tx);
@@ -160,6 +166,10 @@ pub unsafe extern "C" fn PluginOnEvent(
         }
         b"list_apps" => {
             std::thread::spawn(apps::list_apps);
+            0
+        }
+        b"browser_check" => {
+            std::thread::spawn(apps::browser_check);
             0
         }
         b"launch" => {

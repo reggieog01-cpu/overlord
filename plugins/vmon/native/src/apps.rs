@@ -274,3 +274,34 @@ pub fn launch(path: &str, args: Option<&str>) {
         }
     }
 }
+
+/// Well-known browser install locations → (family, name, path).
+const KNOWN_BROWSERS: [(&str, &str, &str); 10] = [
+    ("chromium", "Chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+    ("chromium", "Brave", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ("chromium", "Edge", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+    ("chromium", "Opera", r"C:\Users\{user}\AppData\Local\Programs\Opera\opera.exe"),
+    ("chromium", "Opera GX", r"C:\Users\{user}\AppData\Local\Programs\Opera GX\opera.exe"),
+    ("chromium", "Vivaldi", r"C:\Users\{user}\AppData\Local\Vivaldi\Application\vivaldi.exe"),
+    ("chromium", "Yandex", r"C:\Users\{user}\AppData\Local\Yandex\YandexBrowser\Application\browser.exe"),
+    ("chromium", "Arc", r"C:\Users\{user}\AppData\Local\Programs\Arc\Application\arc.exe"),
+    ("firefox", "Firefox", r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+    ("firefox", "Waterfox", r"C:\Program Files\Waterfox\waterfox.exe"),
+];
+
+/// Report which well-known browsers exist on this machine.
+pub fn browser_check() {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for (family, name, path) in KNOWN_BROWSERS {
+        let real = path.replace("{user}", &user);
+        let found = std::path::Path::new(&real).exists();
+        out.push(serde_json::json!({
+            "family": family,
+            "name": name,
+            "path": real,
+            "found": found,
+        }));
+    }
+    send_json("vmon_browsers", &serde_json::json!({ "browsers": out }));
+}

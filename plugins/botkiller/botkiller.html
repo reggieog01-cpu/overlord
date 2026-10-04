@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Botkiller</title>
+    <link rel="stylesheet" href="/plugins/botkiller/assets/botkiller.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <h1>Botkiller</h1>
+        <p class="sub">Suspicious process &amp; persistence scanner / remediator</p>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <label class="label">Client ID</label>
+          <input id="client-id" class="input" placeholder="clientId" />
+        </div>
+        <div class="actions">
+          <button id="scan-btn" class="btn">Scan</button>
+          <button id="remediate-btn" class="btn danger" disabled>Remediate selected</button>
+          <label class="check-inline">
+            <input type="checkbox" id="dry-run" checked /> Dry run
+          </label>
+          <span id="status-pill" class="pill">Idle</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Findings <span id="findings-count" class="muted"></span></h2>
+        <table class="table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="check-all" /></th>
+              <th>Verdict</th>
+              <th>Score</th>
+              <th>Kind</th>
+              <th>Name</th>
+              <th>Path</th>
+              <th>Reasons</th>
+              <th>Persistence</th>
+            </tr>
+          </thead>
+          <tbody id="findings-body">
+            <tr><td colspan="8" class="empty">Run a scan to populate findings.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <pre id="status-log" class="log"></pre>
+      </section>
+    </main>
+
+    <script src="/plugins/botkiller/assets/botkiller.js"></script>
+  </body>
+</html>
