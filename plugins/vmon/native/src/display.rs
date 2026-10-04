@@ -67,13 +67,20 @@ fn enum_displays() -> Vec<(String, String, bool)> {
 }
 
 /// Device name (\\.\DISPLAYn) of the MttVDD virtual display, if present.
+/// Device name (\\.\DISPLAYn) of the MttVDD virtual display, if present.
+/// Boxes accumulate one device node per devcon install, so several MttVDD
+/// entries can coexist - prefer the ACTIVE one, else the LAST (newest).
 pub fn find_virtual_display() -> Option<(String, bool)> {
-    enum_displays()
+    let mut vdds: Vec<(String, bool)> = enum_displays()
         .into_iter()
-        .find(|(_, id, _)| id.contains("mttvdd"))
+        .filter(|(_, id, _)| id.contains("mttvdd"))
         .map(|(name, _, active)| (name, active))
+        .collect();
+    if let Some((name, _)) = vdds.iter().find(|(_, active)| *active) {
+        return Some((name.clone(), true));
+    }
+    vdds.pop().map(|(name, active)| (name, active))
 }
-
 fn run_hidden(exe: &str, args: &str, wait_ms: u32) -> Result<u32, String> {
     let cmd = format!("{} {}", exe, args);
     let mut cmd_wide = to_wide(&cmd);
@@ -387,6 +394,11 @@ pub fn ensure_display_at(width: u32, height: u32, far_x: i32, far_y: i32) -> Res
         }
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
+
+    // After the attach, the display may be attached under a DIFFERENT GDI
+    // name than the one we found (boxes accumulate stale MttVDD instances).
+    // Re-enumerate and use the ACTIVE instance from here on.
+    let (name, _) = find_virtual_display().unwrap_or((name, false));
 
     // The attach (either path) may come up with a stored database mode. Try
     // to set our mode via CDS (works on some drivers), then park the display
