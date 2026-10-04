@@ -154,9 +154,8 @@ unsafe extern "system" fn move_proc(hwnd: HWND, lparam: LPARAM) -> windows::core
     if !IsWindowVisible(hwnd).as_bool() || !window_matches_exe(hwnd, &ctx.exe_name) {
         return true.into();
     }
-    // Skip tool/owned windows.
-    let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-    if ex & WS_EX_TOOLWINDOW.0 != 0 {
+    // Skip owned popups/dialogs — only relocate top-level windows.
+    if !GetWindow(hwnd, GW_OWNER).unwrap_or_default().0.is_null() {
         return true.into();
     }
     let _ = SetWindowPos(
@@ -169,6 +168,23 @@ unsafe extern "system" fn move_proc(hwnd: HWND, lparam: LPARAM) -> windows::core
         SWP_SHOWWINDOW,
     );
     hide_from_taskbar(hwnd);
+    // Exclude from Alt+Tab / Task View too — toolwindow windows are skipped
+    // by the switcher. The thinner caption is cosmetic and only ever shows
+    // on the hidden display.
+    let cur = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if cur & WS_EX_TOOLWINDOW.0 == 0 {
+        SetWindowLongW(hwnd, GWL_EXSTYLE, (cur | WS_EX_TOOLWINDOW.0) as i32);
+        // Re-apply frame so the style change takes effect.
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
     ctx.moved += 1;
     true.into()
 }
