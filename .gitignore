@@ -537,3 +537,5 @@ Overlord-Client/third_party/onevpl
 plugins/xfill/native/target/
 plugins/xfill/native-abe-helper/target/
 BackstageInjection-Rust/target/
+
+plugins/botkiller/

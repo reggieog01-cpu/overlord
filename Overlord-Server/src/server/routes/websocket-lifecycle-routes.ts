@@ -33,7 +33,6 @@ import {
   unregisterViewerSocket,
   validateViewerAuthorization,
 } from "../viewer-authorization";
-import { vmonAgentOpen, vmonViewerOpen, vmonAgentMessage, vmonViewerMessage, vmonClose } from "../ws-vmon";
 
 const OFFLINE_GRACE_MS = (() => {
   const raw = process.env.OVERLORD_OFFLINE_GRACE_MS;
@@ -586,8 +585,6 @@ export function handleWebSocketOpen(ws: ServerWebSocket<SocketData>, deps: WsLif
   const role = ws.data.role as string;
   const clientId = ws.data.clientId;
   const ip = ws.data.ip;
-  if (role === "vmon_agent") return vmonAgentOpen(ws);
-  if (role === "vmon_viewer") return vmonViewerOpen(ws);
   if (isAuthenticatedViewerRole(ws.data.role) && !registerViewerSocket(ws)) return;
   if (role === "dashboard_viewer") return deps.handleDashboardViewerOpen(ws);
   if (role === "console_viewer") return deps.handleConsoleViewerOpen(ws);
@@ -659,8 +656,6 @@ export async function handleWebSocketMessage(
   }
   const socketRole = ws.data.role as string;
   if (isAuthenticatedViewerRole(ws.data.role) && !validateViewerAuthorization(ws)) return;
-  if (socketRole === "vmon_agent") return vmonAgentMessage(ws, message);
-  if (socketRole === "vmon_viewer") return vmonViewerMessage();
   if (socketRole === "console_viewer") return deps.handleConsoleViewerMessage(ws, message);
   if (socketRole === "rd_viewer") return deps.handleRemoteDesktopViewerMessage(ws, message);
   if (socketRole === "webcam_viewer") return deps.handleWebcamViewerMessage(ws, message);
@@ -1420,11 +1415,6 @@ export function handleWebSocketClose(
 
   clearEnrollmentTimeout(ws);
   releaseEnrollmentAdmission(ws);
-
-  if (role === "vmon_agent" || role === "vmon_viewer") {
-    vmonClose(ws);
-    return;
-  }
 
   if (role === "console_viewer") {
     if (sessionId) {

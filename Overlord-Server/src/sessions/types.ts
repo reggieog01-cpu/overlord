@@ -14,9 +14,7 @@ export type SocketRole =
   | "voice_viewer"
   | "desktop_audio_viewer"
   | "dashboard_viewer"
-  | "chat_viewer"
-  | "vmon_agent"
-  | "vmon_viewer";
+  | "chat_viewer";
 
 export type SocketData = {
   role: SocketRole;
