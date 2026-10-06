@@ -198,7 +198,8 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
     if (printWindowFallbackCtrl && typeof settings.printWindowFallback === "boolean") {
       printWindowFallbackCtrl.checked = settings.printWindowFallback;
     }
-    prefersH264 = false;
+    prefersH264 = settings.preferH264 === true && typeof VideoDecoder === "function";
+    if (codecH264) codecH264.checked = prefersH264;
     const cloneToggle = document.getElementById("backstageCloneToggle");
     const cloneLiteToggle = document.getElementById("backstageCloneLiteToggle");
     const killIfRunningToggle = document.getElementById("backstageKillIfRunningToggle");
@@ -223,7 +224,7 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
       resolution: backstageResolutionSelect?.value || "1080",
       targetFps: Number(targetFpsSelect?.value || 120),
       quality: Number(qualitySlider?.value || 90),
-      preferH264: false,
+      preferH264: !!codecH264?.checked,
       webrtcMode: "off",
       transportPreferenceVersion: CANVAS_TRANSPORT_PREF_VERSION,
       mouse: !!mouseCtrl?.checked,
@@ -250,9 +251,10 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
   if (kbdCtrl) kbdCtrl.checked = false;
   const sharedSettingsSaver = createSharedUiSettingsSaver("backstage", readSharedSettings);
 
-  if (codecH264) {
+  if (codecH264 && typeof VideoDecoder !== "function") {
     codecH264.checked = false;
     codecH264.disabled = true;
+    prefersH264 = false;
   }
   if (webrtcMode) {
     webrtcMode.value = "off";
@@ -265,7 +267,7 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
     codecMode.textContent = `Codec: ${String(mode || "auto").toUpperCase()}${suffix}`;
   }
 
-  setCodecModeLabel("jpeg", "enforced");
+  setCodecModeLabel(prefersH264 ? "h264" : "jpeg");
   setStreamState("connecting", "Connecting");
 
   function updateFpsDisplay(agentValue) {
@@ -1145,7 +1147,7 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
 
   function pushQuality(val) {
     const q = Number(val) || 90;
-    const codec = "jpeg";
+    const codec = prefersH264 && typeof VideoDecoder === "function" ? "h264" : "jpeg";
     console.debug("backstage: pushQuality val=", val, "q=", q, "codec=", codec);
     setCodecModeLabel(codec, "requested");
     sendCmd("backstage_set_quality", { quality: q, codec });
@@ -1175,8 +1177,8 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
 
   if (codecH264) {
     codecH264.addEventListener("change", function () {
-      prefersH264 = false;
-      codecH264.checked = false;
+      prefersH264 = codecH264.checked === true && typeof VideoDecoder === "function";
+      if (!prefersH264) codecH264.checked = false;
       destroyVideoDecoder();
       if (qualitySlider) {
         pushQuality(qualitySlider.value);

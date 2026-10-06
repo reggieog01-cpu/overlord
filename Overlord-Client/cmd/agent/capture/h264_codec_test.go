@@ -77,10 +77,20 @@ func TestDesktopAndBackstageCodecSelectionsAreIndependent(t *testing.T) {
 	}
 }
 
-func TestBackstageCodecIsAlwaysJPEG(t *testing.T) {
+func TestBackstageCodecFollowsRequestedWithAvailabilityFallback(t *testing.T) {
 	t.Cleanup(resetCodecSelectionForTest)
 
-	for _, requested := range []string{"", "raw", "rgba", "h264", "hevc", "invalid-codec"} {
+	SetBackstageQualityAndCodec(73, "h264")
+	got := backstageCodec()
+	if h264Available() {
+		if got != "h264" {
+			t.Fatalf("expected backstage h264 codec when available, got %q", got)
+		}
+	} else if got != "jpeg" {
+		t.Fatalf("expected backstage jpeg fallback when h264 unavailable, got %q", got)
+	}
+
+	for _, requested := range []string{"jpeg", "invalid-codec"} {
 		SetBackstageQualityAndCodec(73, requested)
 		if got := backstageCodec(); got != "jpeg" {
 			t.Fatalf("backstage codec = %q after requesting %q, want jpeg", got, requested)
@@ -88,6 +98,27 @@ func TestBackstageCodecIsAlwaysJPEG(t *testing.T) {
 	}
 	if got := backstageJPEGQuality(); got != 73 {
 		t.Fatalf("backstage quality = %d, want 73", got)
+	}
+}
+
+func TestBackstageCodecSwitchToH264RequestsKeyframe(t *testing.T) {
+	if !h264Available() {
+		t.Skip("h264 is unavailable in this build")
+	}
+	t.Cleanup(resetCodecSelectionForTest)
+	resetCodecSelectionForTest()
+
+	SetBackstageQualityAndCodec(70, "jpeg")
+	_ = webrtcpub.ConsumeKeyframeRequest(webrtcpub.Kindbackstage)
+	backstageLastKeyframe.Store(time.Now().UnixNano())
+
+	SetBackstageQualityAndCodec(70, "h264")
+
+	if backstageLastKeyframe.Load() != 0 {
+		t.Fatal("backstage codec transition did not invalidate the previous keyframe timestamp")
+	}
+	if !webrtcpub.ConsumeKeyframeRequest(webrtcpub.Kindbackstage) {
+		t.Fatal("backstage codec transition did not request an H.264 recovery point")
 	}
 }
 

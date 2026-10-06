@@ -31,6 +31,16 @@ func BackstageCaptureDisplay(display int) (*image.RGBA, error) {
 	return nil, errors.New("backstage not supported on this platform")
 }
 
+type backstageCaptureTicket struct{}
+
+func requestBackstageCapture(display int) (backstageCaptureTicket, bool) {
+	return backstageCaptureTicket{}, false
+}
+
+func (t backstageCaptureTicket) wait() (*image.RGBA, error) {
+	return nil, errors.New("backstage not supported on this platform")
+}
+
 func BackstageMonitorCount() int {
 	return 0
 }

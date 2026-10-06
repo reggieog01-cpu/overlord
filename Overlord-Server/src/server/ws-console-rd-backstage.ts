@@ -1276,7 +1276,7 @@ export function handlebackstageViewerMessage(ws: ServerWebSocket<SocketData>, ra
           logger.debug(`[backstage] restarting stream to change virtual_mode=${state.virtualMode} -> ${virtualMode}`);
       }
       if (!state.isStreaming) {
-        sendbackstageCommand(target, "backstage_set_quality", { quality: state.quality, codec: "jpeg" });
+        sendbackstageCommand(target, "backstage_set_quality", { quality: state.quality, codec: state.codec || "jpeg" });
         sendbackstageCommand(target, "backstage_set_fps", { fps: clampDesktopFps(state.maxFps) });
         sendbackstageCommand(target, "backstage_start", {
           autoStartExplorer: false,
@@ -1319,7 +1319,8 @@ export function handlebackstageViewerMessage(ws: ServerWebSocket<SocketData>, ra
     }
     case "backstage_set_quality": {
       const newQuality = Number(payload.quality) || 90;
-      const newCodec = "jpeg";
+      const requestedCodec = String(payload.codec || "").toLowerCase();
+      const newCodec = requestedCodec === "h264" ? "h264" : "jpeg";
       sendbackstageCommand(target, "backstage_set_quality", { quality: newQuality, codec: newCodec });
       if (state.quality !== newQuality || state.codec !== newCodec) {
         state.quality = newQuality;

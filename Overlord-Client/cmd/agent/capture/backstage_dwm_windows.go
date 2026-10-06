@@ -26,6 +26,7 @@ var (
 	procDWMDestroyWindow                = user32.NewProc("DestroyWindow")
 	backstageDWMStateMu                 sync.Mutex
 	backstageDWMHost                    uintptr
+	backstageDWMHostGeom                rect
 	backstageDWMThumbnails              map[uintptr]*backstageDWMThumbnail
 	backstageDWMOrder                   []uintptr
 	backstageDWMLastFallbackLogUnixNano atomic.Int64
@@ -65,8 +66,10 @@ type backstageDWMSize struct {
 }
 
 type backstageDWMThumbnail struct {
-	handle uintptr
-	size   backstageDWMSize
+	handle    uintptr
+	size      backstageDWMSize
+	lastProps dwmThumbnailProperties
+	propsSet  bool
 }
 
 type backstageDWMCandidate struct {
@@ -186,11 +189,17 @@ func drawbackstageStagingFromDWM(hdcMem uintptr, bounds image.Rectangle, outputW
 			opacity:     255,
 			visible:     1,
 		}
+		if entry.propsSet && entry.lastProps == properties {
+			updated++
+			continue
+		}
 		result, _, _ := procDwmUpdateThumbnailProperties.Call(
 			entry.handle,
 			uintptr(unsafe.Pointer(&properties)),
 		)
 		if int32(result) >= 0 {
+			entry.lastProps = properties
+			entry.propsSet = true
 			updated++
 		}
 	}
@@ -252,19 +261,25 @@ func backstageEnsureDWMHostLocked(bounds image.Rectangle, outputW, outputH int) 
 			return 0
 		}
 		backstageDWMHost = host
+		backstageDWMHostGeom = rect{left: int32(bounds.Min.X), top: int32(bounds.Min.Y), right: int32(bounds.Min.X + outputW), bottom: int32(bounds.Min.Y + outputH)}
 		procDWMShowWindow.Call(host, backstageDWMSWShowNoActivate)
 		procDWMUpdateWindow.Call(host)
+		return backstageDWMHost
 	}
 
-	procSetWindowPos.Call(
-		backstageDWMHost,
-		backstageDWMHWNDBottom,
-		uintptr(int32(bounds.Min.X)),
-		uintptr(int32(bounds.Min.Y)),
-		uintptr(int32(outputW)),
-		uintptr(int32(outputH)),
-		SWP_NOACTIVATE|SWP_SHOWWINDOW,
-	)
+	geom := rect{left: int32(bounds.Min.X), top: int32(bounds.Min.Y), right: int32(bounds.Min.X + outputW), bottom: int32(bounds.Min.Y + outputH)}
+	if geom != backstageDWMHostGeom {
+		procSetWindowPos.Call(
+			backstageDWMHost,
+			backstageDWMHWNDBottom,
+			uintptr(geom.left),
+			uintptr(geom.top),
+			uintptr(geom.right-geom.left),
+			uintptr(geom.bottom-geom.top),
+			SWP_NOACTIVATE|SWP_SHOWWINDOW,
+		)
+		backstageDWMHostGeom = geom
+	}
 	return backstageDWMHost
 }
 
@@ -399,61 +414,78 @@ func backstageDWMFrameHasContent(frame []byte) bool {
 }
 
 func backstageEnsureDWMCompCache(w, h int) (uintptr, []byte, bool) {
-	if backstageCompHdcMem != 0 &&
+	if backstageCompHdcMem[0] != 0 &&
+		backstageCompHdcMem[1] != 0 &&
 		backstageCompW == w &&
 		backstageCompH == h &&
-		backstageCompBits != nil {
-		return backstageCompHdcMem, unsafe.Slice((*byte)(backstageCompBits), w*h*4), true
+		backstageCompBits[0] != nil &&
+		backstageCompBits[1] != nil {
+		backstageCompFlip ^= 1
+		idx := backstageCompFlip
+		return backstageCompHdcMem[idx], unsafe.Slice((*byte)(backstageCompBits[idx]), w*h*4), true
 	}
 
-	if backstageCompHbmp != 0 {
-		deleteObject(backstageCompHbmp)
-		backstageCompHbmp = 0
-	}
-	if backstageCompHdcMem != 0 {
-		deleteDC(backstageCompHdcMem)
-		backstageCompHdcMem = 0
-	}
-	backstageCompBits = nil
-	backstageCompW = 0
-	backstageCompH = 0
+	backstageFreeDWMCompCache()
 
 	screenDC := getDC(0)
 	if screenDC == 0 {
 		return 0, nil, false
 	}
-	backstageCompHdcMem = createCompatibleDC(screenDC)
-	releaseDC(0, screenDC)
-	if backstageCompHdcMem == 0 {
-		return 0, nil, false
-	}
+	defer releaseDC(0, screenDC)
 
-	info := bitmapInfo{
-		bmiHeader: bitmapInfoHeader{
-			biSize:        uint32(unsafe.Sizeof(bitmapInfoHeader{})),
-			biWidth:       int32(w),
-			biHeight:      -int32(h),
-			biPlanes:      1,
-			biBitCount:    32,
-			biCompression: BI_RGB,
-		},
+	for idx := 0; idx < 2; idx++ {
+		hdcMem := createCompatibleDC(screenDC)
+		if hdcMem == 0 {
+			backstageFreeDWMCompCache()
+			return 0, nil, false
+		}
+		info := bitmapInfo{
+			bmiHeader: bitmapInfoHeader{
+				biSize:        uint32(unsafe.Sizeof(bitmapInfoHeader{})),
+				biWidth:       int32(w),
+				biHeight:      -int32(h),
+				biPlanes:      1,
+				biBitCount:    32,
+				biCompression: BI_RGB,
+			},
+		}
+		var bits unsafe.Pointer
+		hbmp := createDIBSection(hdcMem, &info, DIB_RGB_COLORS, &bits)
+		if hbmp == 0 || bits == nil {
+			deleteDC(hdcMem)
+			backstageFreeDWMCompCache()
+			return 0, nil, false
+		}
+		selectObject(hdcMem, hbmp)
+		buf := unsafe.Slice((*byte)(bits), w*h*4)
+		for i := range buf {
+			buf[i] = 0
+		}
+		backstageCompHdcMem[idx] = hdcMem
+		backstageCompHbmp[idx] = hbmp
+		backstageCompBits[idx] = bits
 	}
-	backstageCompHbmp = createDIBSection(
-		backstageCompHdcMem,
-		&info,
-		DIB_RGB_COLORS,
-		&backstageCompBits,
-	)
-	if backstageCompHbmp == 0 || backstageCompBits == nil {
-		deleteDC(backstageCompHdcMem)
-		backstageCompHdcMem = 0
-		backstageCompBits = nil
-		return 0, nil, false
-	}
-	selectObject(backstageCompHdcMem, backstageCompHbmp)
 	backstageCompW = w
 	backstageCompH = h
-	return backstageCompHdcMem, unsafe.Slice((*byte)(backstageCompBits), w*h*4), true
+	backstageCompFlip = 0
+	return backstageCompHdcMem[0], unsafe.Slice((*byte)(backstageCompBits[0]), w*h*4), true
+}
+
+func backstageFreeDWMCompCache() {
+	for idx := 0; idx < 2; idx++ {
+		if backstageCompHbmp[idx] != 0 {
+			deleteObject(backstageCompHbmp[idx])
+			backstageCompHbmp[idx] = 0
+		}
+		if backstageCompHdcMem[idx] != 0 {
+			deleteDC(backstageCompHdcMem[idx])
+			backstageCompHdcMem[idx] = 0
+		}
+		backstageCompBits[idx] = nil
+	}
+	backstageCompW = 0
+	backstageCompH = 0
+	backstageCompFlip = 0
 }
 
 func backstageCleanupDWMThumbnails() {
@@ -468,6 +500,7 @@ func backstageCleanupDWMThumbnails() {
 		procDWMDestroyWindow.Call(backstageDWMHost)
 	}
 	backstageDWMHost = 0
+	backstageDWMHostGeom = rect{}
 }
 
 func backstageAbandonDWMThumbnails() {
@@ -475,6 +508,7 @@ func backstageAbandonDWMThumbnails() {
 	backstageDWMThumbnails = nil
 	backstageDWMOrder = nil
 	backstageDWMHost = 0
+	backstageDWMHostGeom = rect{}
 	backstageDWMStateMu.Unlock()
 }
 

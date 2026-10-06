@@ -42,6 +42,7 @@ func backstageStart(ctx context.Context, env *rt.Env, autoStartExplorer bool) er
 	capture.StartFrameFlowStream("backstage", fps)
 	defer capture.StopFrameFlowStream("backstage")
 	defer capture.CleanupbackstageDesktop()
+	defer capture.ClearBackstagePrefetch()
 
 	if autoStartExplorer {
 		goSafe("backstage auto-start explorer", nil, func() {

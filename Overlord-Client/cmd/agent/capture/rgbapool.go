@@ -2,6 +2,7 @@ package capture
 
 import (
 	"image"
+	"sync"
 	"sync/atomic"
 )
 
@@ -73,4 +74,25 @@ func maxReusableCapacity(need int) int {
 		limit = maxPooledRGBABytes
 	}
 	return limit
+}
+
+// Borrowed frames wrap capture-owned memory (e.g. a DIB section) instead of a
+// pooled buffer; they must never enter the pool because the capture thread
+// reuses the underlying memory for subsequent frames.
+var backstageBorrowedFrames sync.Map // *image.RGBA -> struct{}
+
+func newBorrowedRGBA(pix []byte, w, h int) *image.RGBA {
+	img := &image.RGBA{Pix: pix, Stride: w * 4, Rect: image.Rect(0, 0, w, h)}
+	backstageBorrowedFrames.Store(img, struct{}{})
+	return img
+}
+
+func releaseBackstageFrame(img *image.RGBA) {
+	if img == nil {
+		return
+	}
+	if _, borrowed := backstageBorrowedFrames.LoadAndDelete(img); borrowed {
+		return
+	}
+	PutRGBA(img)
 }

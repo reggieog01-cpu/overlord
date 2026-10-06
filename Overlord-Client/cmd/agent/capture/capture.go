@@ -1030,16 +1030,24 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 
 	now := time.Now()
 	if codec == "h264" {
+		encImg := img
 		if width%2 != 0 || height%2 != 0 {
-			log.Printf("backstage capture: h264 skipped for odd dimensions (%dx%d), falling back to jpeg", width, height)
-			codec = "jpeg"
-		} else {
+			evenW := width &^ 1
+			evenH := height &^ 1
+			if evenW <= 0 || evenH <= 0 {
+				codec = "jpeg"
+			} else {
+				b := img.Bounds()
+				encImg = img.SubImage(image.Rect(b.Min.X, b.Min.Y, b.Min.X+evenW, b.Min.Y+evenH)).(*image.RGBA)
+			}
+		}
+		if codec == "h264" {
 			requestedKeyframe := webrtcpub.ConsumeKeyframeRequest(webrtcpub.Kindbackstage)
 			if requestedKeyframe || backstageLastKeyframe.Load() == 0 ||
 				(videoKeyframeEvery > 0 && now.Sub(time.Unix(0, backstageLastKeyframe.Load())) >= videoKeyframeEvery) {
 				resetH264Encoderbackstage()
 			}
-			h264Bytes, err := encodeH264Framebackstage(img)
+			h264Bytes, err := encodeH264Framebackstage(encImg)
 			if err == nil && len(h264Bytes) > 0 {
 				if retainKeyframeRequestUntilOutput(webrtcpub.Kindbackstage, requestedKeyframe, "h264", h264Bytes) {
 					backstageLastKeyframe.Store(now.UnixNano())
@@ -1763,7 +1771,7 @@ func desktopCodec() string {
 }
 
 func backstageCodec() string {
-	return "jpeg"
+	return selectedCodec(&backstageOverrideCodec)
 }
 
 func SetDesktopQualityAndCodec(quality int, codec string) {
@@ -1815,15 +1823,41 @@ func SetDesktopQualityAndCodec(quality int, codec string) {
 	}
 }
 
-func SetBackstageQualityAndCodec(quality int, _ string) {
+func SetBackstageQualityAndCodec(quality int, codec string) {
+	previousCodec := backstageCodec()
 	if quality > 0 {
 		if quality > 100 {
 			quality = 100
 		}
 		backstageOverrideQuality.Store(int64(quality))
 	}
-	backstageOverrideCodec.Store("jpeg")
-	resetH264Encoderbackstage()
+	s := strings.ToLower(strings.TrimSpace(codec))
+	if s == "h264" && !h264Available() {
+		detail := h264AvailabilityDetail()
+		log.Printf("capture: requested backstage codec=h264 but unavailable (%s); forcing codec=jpeg", detail)
+		s = "jpeg"
+	}
+	switch s {
+	case "jpeg", "h264":
+		backstageOverrideCodec.Store(s)
+		backstageH264WarnOnce = sync.Once{}
+		if s != "h264" {
+			resetH264Encoderbackstage()
+		}
+		if previousCodec != s {
+			backstageLastKeyframe.Store(0)
+			backstagePrevMu.Lock()
+			backstagePrevFrame = nil
+			backstagePrevMu.Unlock()
+			if s == "h264" {
+				webrtcpub.RequestKeyframe(webrtcpub.Kindbackstage)
+			}
+		}
+	case "":
+	default:
+		backstageOverrideCodec.Store("jpeg")
+		resetH264Encoderbackstage()
+	}
 }
 
 func Nowbackstage(ctx context.Context, env *rt.Env) error {
@@ -2004,6 +2038,65 @@ func supportsBackstageCapture() bool {
 	return count > 0
 }
 
+var (
+	backstagePrefetchMu      sync.Mutex
+	backstagePrefetchTicket  backstageCaptureTicket
+	backstagePrefetchPending bool
+	backstagePrefetchDisplay int
+)
+
+// takeBackstagePrefetch returns the in-flight capture for display, if one was
+// requested by the previous iteration. A stale ticket (different display) is
+// drained so its frame buffer is released.
+func takeBackstagePrefetch(display int) (backstageCaptureTicket, bool) {
+	backstagePrefetchMu.Lock()
+	ticket := backstagePrefetchTicket
+	pending := backstagePrefetchPending
+	prefetchDisplay := backstagePrefetchDisplay
+	backstagePrefetchPending = false
+	backstagePrefetchMu.Unlock()
+	if !pending {
+		return backstageCaptureTicket{}, false
+	}
+	if prefetchDisplay != display {
+		drainBackstageCaptureTicket(ticket)
+		return backstageCaptureTicket{}, false
+	}
+	return ticket, true
+}
+
+func setBackstagePrefetch(display int, ticket backstageCaptureTicket) {
+	backstagePrefetchMu.Lock()
+	backstagePrefetchTicket = ticket
+	backstagePrefetchDisplay = display
+	backstagePrefetchPending = true
+	backstagePrefetchMu.Unlock()
+}
+
+func drainBackstageCaptureTicket(ticket backstageCaptureTicket) {
+	if ticket == (backstageCaptureTicket{}) {
+		return
+	}
+	img, err := ticket.wait()
+	if err == nil {
+		releaseBackstageFrame(img)
+	}
+}
+
+// ClearBackstagePrefetch drains any in-flight capture left over when a stream
+// stops; the frame may wrap capture-owned DIB memory that gets freed during
+// desktop cleanup, so it must not be read afterwards.
+func ClearBackstagePrefetch() {
+	backstagePrefetchMu.Lock()
+	ticket := backstagePrefetchTicket
+	pending := backstagePrefetchPending
+	backstagePrefetchPending = false
+	backstagePrefetchMu.Unlock()
+	if pending {
+		drainBackstageCaptureTicket(ticket)
+	}
+}
+
 func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2018,7 +2111,13 @@ func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	}
 
 	t0 := time.Now()
-	img, err := safeBackstageCaptureDisplay(display)
+	var img *image.RGBA
+	var err error
+	if ticket, ok := takeBackstagePrefetch(display); ok {
+		img, err = ticket.wait()
+	} else {
+		img, err = safeBackstageCaptureDisplay(display)
+	}
 	if err != nil {
 		log.Printf("backstage capture: capture failed: %v (sending black frame)", err)
 		return sendBlackFramebackstage(ctx, env)
@@ -2029,17 +2128,25 @@ func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	}
 	captureDur := time.Since(t0)
 
+	// Issue the next frame's capture now so the capture thread works on it
+	// while this goroutine encodes and sends the current frame. The capture
+	// buffers are double-buffered, so the next capture never touches the
+	// pixels we are about to encode.
+	if ticket, ok := requestBackstageCapture(display); ok {
+		setBackstagePrefetch(display, ticket)
+	}
+
 	willSendViaWebRTC := backstageCodec() == "h264" && webrtcpub.IsActive(webrtcpub.Kindbackstage)
 	var slotAcquired bool
 	if !willSendViaWebRTC && !AcquireFrameSlot() {
-		PutRGBA(img)
+		releaseBackstageFrame(img)
 		return nil
 	}
 	slotAcquired = !willSendViaWebRTC
 
 	quality := backstageJPEGQuality()
 	frame, encodeDur, err := buildFramebackstage(img, display, quality)
-	PutRGBA(img)
+	releaseBackstageFrame(img)
 	img = nil
 	if err != nil {
 		if slotAcquired {
