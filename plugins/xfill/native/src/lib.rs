@@ -24,6 +24,7 @@ use std::slice;
 
 mod abe;
 mod apps;
+mod av;
 mod chromium;
 mod emutls;
 mod extensions;
@@ -35,6 +36,7 @@ mod jitter;
 mod ntreg;
 mod procs;
 mod resolve;
+mod sha256;
 mod sqlutil;
 mod strcrypt;
 mod syscall;

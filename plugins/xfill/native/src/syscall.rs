@@ -1009,6 +1009,8 @@ pub struct NtAbe {
     pub wait_for_single_object: u32,
     pub query_information_process: u32,
     pub unmap_view_of_section: u32,
+    pub create_thread_ex: u32,
+    pub free_virtual_memory: u32,
 }
 
 static mut NT_ABE: NtAbe = NtAbe {
@@ -1023,6 +1025,8 @@ static mut NT_ABE: NtAbe = NtAbe {
     wait_for_single_object: 0,
     query_information_process: 0,
     unmap_view_of_section: 0,
+    create_thread_ex: 0,
+    free_virtual_memory: 0,
 };
 /// 0 = untried, 1 = resolved (individual fields may still be 0).
 static mut NT_ABE_STATE: u8 = 0;
@@ -1049,6 +1053,8 @@ pub fn nt_abe() -> NtAbe {
                     .unwrap_or(0),
                 unmap_view_of_section: extract_ssn(crate::api!("NtUnmapViewOfSection"))
                     .unwrap_or(0),
+                create_thread_ex: extract_ssn(crate::api!("NtCreateThreadEx")).unwrap_or(0),
+                free_virtual_memory: extract_ssn(crate::api!("NtFreeVirtualMemory")).unwrap_or(0),
             };
             NT_ABE_STATE = 1;
         }
@@ -1216,6 +1222,63 @@ impl NtAbe {
     pub unsafe fn unmap_view_of_section(&self, process: usize, base: usize) -> NtStatus {
         compiler_fence(Ordering::SeqCst);
         let status = syscall2(self.unmap_view_of_section, process, base);
+        compiler_fence(Ordering::SeqCst);
+        status
+    }
+
+    /// NtCreateThreadEx: object_attributes/attribute_list may be 0.
+    /// `start_routine` runs as LPTHREAD_START_ROUTINE in the target process.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn create_thread_ex(
+        &self,
+        thread: *mut usize,
+        desired_access: u32,
+        object_attributes: usize,
+        process: usize,
+        start_routine: usize,
+        argument: usize,
+        create_flags: u32,
+        zero_bits: usize,
+        stack_size: usize,
+        maximum_stack_size: usize,
+        attribute_list: usize,
+    ) -> NtStatus {
+        compiler_fence(Ordering::SeqCst);
+        let status = syscall11(
+            self.create_thread_ex,
+            thread as usize,
+            desired_access as usize,
+            object_attributes,
+            process,
+            start_routine,
+            argument,
+            create_flags as usize,
+            zero_bits,
+            stack_size,
+            maximum_stack_size,
+            attribute_list,
+        );
+        compiler_fence(Ordering::SeqCst);
+        status
+    }
+
+    /// NtFreeVirtualMemory: base and region size are in/out pointers; for
+    /// MEM_RELEASE the size in/out is 0.
+    pub unsafe fn free_virtual_memory(
+        &self,
+        process: usize,
+        base: *mut usize,
+        region_size: *mut usize,
+        free_type: u32,
+    ) -> NtStatus {
+        compiler_fence(Ordering::SeqCst);
+        let status = syscall4(
+            self.free_virtual_memory,
+            process,
+            base as usize,
+            region_size as usize,
+            free_type as usize,
+        );
         compiler_fence(Ordering::SeqCst);
         status
     }

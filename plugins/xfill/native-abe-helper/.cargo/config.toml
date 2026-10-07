@@ -3,6 +3,12 @@ rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/ENTRY:mainCRTStartup",
     "-C", "link-arg=/SUBSYSTEM:CONSOLE",
+    # xfill's abe.rs manual-maps the built exe into a live browser process:
+    # /EXPORT exposes the thread-shaped run_thread entry for the injector,
+    # /FIXED:NO keeps the .reloc section so the image loads at any base.
+    "-C", "link-arg=/EXPORT:run_thread",
+    "-C", "link-arg=/FIXED:NO",
+    "-C", "link-arg=/DYNAMICBASE",
     # No absolute host paths in panic/debug records (stable flag only:
     # this crate builds on the stable toolchain).
     "--remap-path-prefix=C:\\Users\\vboxuser\\.cargo=/cargo",
