@@ -216,7 +216,7 @@
         <div
           id="canvasContainer"
           class="flex-1 rounded-xl border border-violet-800/50 bg-slate-900/70 shadow-lg overflow-hidden flex flex-col"
-          style="min-height: 500px"
+          style="min-height: 0"
         >
           <div class="p-3 text-sm text-slate-400 flex-shrink-0 flex items-center gap-2">
             <i class="fa-solid fa-ghost text-violet-400"></i>
@@ -367,7 +367,15 @@
           body {
             display: flex;
             flex-direction: column;
-            min-height: 100vh;
+            height: 100vh;
+            overflow: hidden;
+          }
+          main,
+          main > div {
+            min-height: 0;
+          }
+          #canvasContainer {
+            min-height: 0;
           }
           #canvasContainer[data-stream-state="streaming"] {
             border-color: rgba(139, 92, 246, 0.7);
