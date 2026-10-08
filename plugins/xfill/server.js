@@ -968,6 +968,11 @@ export default {
 
   rpc: {
     clientStatus(ctx) {
+      // Prune completed entries so the map (and the panel strip) stays small.
+      const now = Date.now();
+      for (const [k, s] of clientStatus) {
+        if (s.stage === "done" && now - s.at > 5 * 60 * 1000) clientStatus.delete(k);
+      }
       return [...clientStatus.entries()].map(([clientId, s]) => ({
         clientId,
         stage: s.stage,

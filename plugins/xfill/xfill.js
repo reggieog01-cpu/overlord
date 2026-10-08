@@ -633,11 +633,15 @@
     if (!clientStatusEl) return;
     try {
       const rows = await rpc("clientStatus");
-      if (!Array.isArray(rows) || rows.length === 0) {
+      // Only surface active or very recent entries; "done" older than 2 min is noise.
+      const fresh = (Array.isArray(rows) ? rows : [])
+        .filter((s) => s.stage !== "done" || Date.now() - s.at < 120000)
+        .slice(-5);
+      if (fresh.length === 0) {
         clientStatusEl.classList.add("hidden");
         return;
       }
-      const lines = rows.map((s) => {
+      const lines = fresh.map((s) => {
         const ago = Math.max(0, Math.round((Date.now() - s.at) / 1000));
         const msg = s.message ? ` — ${s.message}` : "";
         return `${s.clientId.slice(0, 12)}…  ${s.stage}${msg}  (${ago}s ago)`;
