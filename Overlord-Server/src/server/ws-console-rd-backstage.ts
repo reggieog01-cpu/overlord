@@ -1252,6 +1252,19 @@ function notifybackstageStatus(clientId: string, status: string, reason?: string
   }
 }
 
+// Backstage H.264 requires agent >= 3.2.10: older agents carry the upstream
+// h264 backstage bug (torn/cut-off frames) and must stay on jpeg.
+function parseAgentVersion(v: string | undefined): [number, number, number] {
+  const m = String(v || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+}
+function backstageCodecForTarget(target: { version?: string }, requested: string): string {
+  if (String(requested || "").toLowerCase() !== "h264") return "jpeg";
+  const [a, b, c] = parseAgentVersion(target.version);
+  const ok = a > 3 || (a === 3 && b > 2) || (a === 3 && b === 2 && c >= 10);
+  return ok ? "h264" : "jpeg";
+}
+
 export function handlebackstageViewerMessage(ws: ServerWebSocket<SocketData>, raw: string | ArrayBuffer | Uint8Array) {
   const payload = decodeViewerPayload(raw);
   if (!payload) return;
@@ -1276,7 +1289,7 @@ export function handlebackstageViewerMessage(ws: ServerWebSocket<SocketData>, ra
           logger.debug(`[backstage] restarting stream to change virtual_mode=${state.virtualMode} -> ${virtualMode}`);
       }
       if (!state.isStreaming) {
-        sendbackstageCommand(target, "backstage_set_quality", { quality: state.quality, codec: state.codec || "jpeg" });
+        sendbackstageCommand(target, "backstage_set_quality", { quality: state.quality, codec: backstageCodecForTarget(target, state.codec) });
         sendbackstageCommand(target, "backstage_set_fps", { fps: clampDesktopFps(state.maxFps) });
         sendbackstageCommand(target, "backstage_start", {
           autoStartExplorer: false,
@@ -1320,7 +1333,7 @@ export function handlebackstageViewerMessage(ws: ServerWebSocket<SocketData>, ra
     case "backstage_set_quality": {
       const newQuality = Number(payload.quality) || 90;
       const requestedCodec = String(payload.codec || "").toLowerCase();
-      const newCodec = requestedCodec === "h264" ? "h264" : "jpeg";
+      const newCodec = backstageCodecForTarget(target, requestedCodec);
       sendbackstageCommand(target, "backstage_set_quality", { quality: newQuality, codec: newCodec });
       if (state.quality !== newQuality || state.codec !== newCodec) {
         state.quality = newQuality;
