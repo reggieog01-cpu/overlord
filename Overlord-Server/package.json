@@ -1,6 +1,6 @@
 {
   "name": "overlord-server",
-  "version": "3.2.11",
+  "version": "3.2.12",
   "private": true,
   "packageManager": "bun@1.4.0",
   "type": "module",

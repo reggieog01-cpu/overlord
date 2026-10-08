@@ -1053,7 +1053,7 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 					backstageLastKeyframe.Store(now.UnixNano())
 				}
 				statFullFrames.Add(1)
-				frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "h264", Backstage: true}, Data: h264Bytes}
+				frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "h264", Backstage: true, Width: encImg.Bounds().Dx(), Height: encImg.Bounds().Dy()}, Data: h264Bytes}
 				return frame, time.Since(encStart), nil
 			}
 			if requestedKeyframe {
@@ -1076,13 +1076,16 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 	backstagePrevMu.Unlock()
 
 	if pf == nil || pf.w != width || pf.h != height || (keyframeEvery > 0 && now.Sub(time.Unix(0, backstageLastKeyframe.Load())) > keyframeEvery) {
+		if pf != nil && (pf.w != width || pf.h != height) {
+			log.Printf("backstage capture: capture dimensions changed (%dx%d -> %dx%d); sending full frame", pf.w, pf.h, width, height)
+		}
 		jpegBytes, err := encodeJPEG(img, quality)
 		backstagePrevMu.Lock()
 		copyPrevbackstage(img)
 		backstagePrevMu.Unlock()
 		backstageLastKeyframe.Store(now.UnixNano())
 		statFullFrames.Add(1)
-		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "jpeg", Backstage: true}, Data: jpegBytes}
+		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "jpeg", Backstage: true, Width: width, Height: height}, Data: jpegBytes}
 		return frame, time.Since(encStart), err
 	}
 
@@ -1097,7 +1100,7 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 		// Keepalive frames indicate no block-level changes, so avoid copying the
 		// full RGBA buffer into prevFrame again.
 		statKeepaliveFrames.Add(1)
-		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "blocks", Backstage: true}, Data: blockPayload}
+		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "blocks", Backstage: true, Width: width, Height: height}, Data: blockPayload}
 		return frame, encDur, nil
 	}
 
@@ -1112,7 +1115,7 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 		backstageLastKeyframe.Store(now.UnixNano())
 		statBlockFallbacks.Add(1)
 		statFullFrames.Add(1)
-		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "jpeg", Backstage: true}, Data: jpegBytes}
+		frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: "jpeg", Backstage: true, Width: width, Height: height}, Data: jpegBytes}
 		return frame, time.Since(encStart), err
 	}
 
@@ -1122,7 +1125,7 @@ func buildFramebackstage(img *image.RGBA, display int, quality int) (wire.Frame,
 	if codec == "raw" {
 		format = "blocks_raw"
 	}
-	frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: format, Backstage: true}, Data: blockPayload}
+	frame := wire.Frame{Type: "frame", Header: wire.FrameHeader{Monitor: display, FPS: 0, Format: format, Backstage: true, Width: width, Height: height}, Data: blockPayload}
 	return frame, encDur, nil
 }
 

@@ -1445,13 +1445,33 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
     }
   }
 
+  let lastCanvasKeyframeReqAt = 0;
+  function requestCanvasKeyframe(reason) {
+    const now = performance.now();
+    if (now - lastCanvasKeyframeReqAt < 500) return;
+    lastCanvasKeyframeReqAt = now;
+    sendCmd("backstage_request_keyframe", { reason });
+  }
+
   async function processFrameBuffer(buf) {
     const fps = buf[5];
     const format = buf[6];
+    // FRM v2 packets carry the authoritative frame geometry in bytes 8-11
+    // (agents >= 3.2.12). Older agents send 8-byte headers.
+    const headerLength = buf[3] >= 2 && buf.length >= 12 ? 12 : 8;
+    if (headerLength === 12) {
+      const headerW = buf[8] | (buf[9] << 8);
+      const headerH = buf[10] | (buf[11] << 8);
+      if (headerW > 0 && headerH > 0 && (canvas.width !== headerW || canvas.height !== headerH)) {
+        canvas.width = headerW;
+        canvas.height = headerH;
+        if (format === 2 || format === 3) hasCanvasBase = false;
+      }
+    }
 
     if (format === 1) {
       setCodecModeLabel("jpeg", "active");
-      await drawJpegSlice(buf.slice(8), null);
+      await drawJpegSlice(buf.slice(headerLength), null);
       hasCanvasBase = true;
       updateFpsDisplay(fps);
       return;
@@ -1459,8 +1479,8 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
 
     if (format === 2 || format === 3) {
       setCodecModeLabel(format === 3 ? "raw" : "jpeg", "blocks");
-      if (buf.length < 16) return;
-      const dv = new DataView(buf.buffer, 8);
+      if (buf.length < headerLength + 8) return;
+      const dv = new DataView(buf.buffer, buf.byteOffset + headerLength, buf.byteLength - headerLength);
       let pos = 0;
       const width = dv.getUint16(pos, true);
       pos += 2;
@@ -1474,8 +1494,12 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
         canvas.height = height;
         hasCanvasBase = false;
       }
-      if (blockCount > 0 && !hasCanvasBase) {
-        sendCmd("backstage_request_keyframe", { reason: "viewer_missing_base" });
+      if (!hasCanvasBase) {
+        // Blocks are deltas against the canvas contents; without a full-frame
+        // base they cannot be applied. This must also fire for keepalive
+        // (blockCount === 0) packets, otherwise an idle desktop after a
+        // viewer reload leaves the canvas black until something changes.
+        requestCanvasKeyframe("viewer_missing_base");
         return;
       }
 
@@ -1491,9 +1515,16 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
         pos += 2;
         const len = dv.getUint32(pos, true);
         pos += 4;
-        const start = 8 + pos;
+        const start = headerLength + pos;
         const end = start + len;
         if (end > buf.length) break;
+        if (x + w > canvas.width || y + h > canvas.height) {
+          // Block escapes the canvas: geometry desync between agent and
+          // viewer. Drop the delta stream and resync with a full frame.
+          hasCanvasBase = false;
+          requestCanvasKeyframe("block_out_of_bounds");
+          return;
+        }
         const slice = buf.subarray(start, end);
         pos += len;
         if (format === 2) {
@@ -1509,7 +1540,7 @@ import { createSharedUiSettingsSaver, loadSharedUiSettings } from "./generated/s
 
     if (format === 4) {
       setCodecModeLabel("h264", "active");
-      const h264Bytes = buf.slice(8);
+      const h264Bytes = buf.slice(headerLength);
       if (!h264Bytes.length) return;
       if (!ensureVideoDecoder()) {
         fallbackToJpegCodec("WebCodecs decoder unavailable");
