@@ -420,12 +420,25 @@ func backstageEnsureDWMCompCache(w, h int) (uintptr, []byte, bool) {
 		backstageCompH == h &&
 		backstageCompBits[0] != nil &&
 		backstageCompBits[1] != nil {
-		backstageCompFlip ^= 1
+		if !backstageCompFlipUsed {
+			backstageCompFlip ^= 1
+			backstageCompFlipUsed = true
+		}
 		idx := backstageCompFlip
 		return backstageCompHdcMem[idx], unsafe.Slice((*byte)(backstageCompBits[idx]), w*h*4), true
 	}
 
-	backstageFreeDWMCompCache()
+	for idx := 0; idx < 2; idx++ {
+		if backstageCompHdcMem[idx] != 0 || backstageCompHbmp[idx] != 0 {
+			backstageRetireDIBPair(backstageCompHdcMem[idx], backstageCompHbmp[idx])
+		}
+		backstageCompHdcMem[idx] = 0
+		backstageCompHbmp[idx] = 0
+		backstageCompBits[idx] = nil
+	}
+	backstageCompW = 0
+	backstageCompH = 0
+	backstageCompFlip = 0
 
 	screenDC := getDC(0)
 	if screenDC == 0 {
@@ -468,6 +481,7 @@ func backstageEnsureDWMCompCache(w, h int) (uintptr, []byte, bool) {
 	backstageCompW = w
 	backstageCompH = h
 	backstageCompFlip = 0
+	backstageCompFlipUsed = true
 	return backstageCompHdcMem[0], unsafe.Slice((*byte)(backstageCompBits[0]), w*h*4), true
 }
 

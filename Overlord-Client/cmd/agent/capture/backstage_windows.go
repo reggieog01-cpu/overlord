@@ -204,6 +204,12 @@ var (
 	backstageCompW      int
 	backstageCompH      int
 	backstageCompFlip   int
+	// Flip guards reset per capture by BackstageCaptureDisplayOnThread: each
+	// buffer set may alternate at most once per capture, otherwise a second
+	// staging/fallback attempt in the same capture would target the buffer the
+	// previous frame's encoder is still reading (torn composites).
+	backstageCompFlipUsed bool
+	backstageCapFlipUsed  bool
 
 	backstagePendingMouseMove *backstageTask
 	backstagePendingMoveMu    sync.Mutex
@@ -410,6 +416,8 @@ func CleanupbackstageDesktop() {
 
 	backstageClearWindowCache()
 	backstageWinCachePrev = nil
+
+	backstageFlushRetiredDIBs()
 
 	backstageFreeDWMCompCache()
 	backstageCaptureMu.Unlock()
@@ -905,6 +913,31 @@ var (
 	backstageCapFlip      int
 )
 
+// Retired DIB pairs are freed at desktop cleanup instead of at recreation:
+// borrowed frames returned to the encoder may still reference their memory.
+type backstageDIBPair struct {
+	hdcMem uintptr
+	hbmp   uintptr
+}
+
+var backstageRetiredDIBs []backstageDIBPair
+
+func backstageRetireDIBPair(hdcMem, hbmp uintptr) {
+	backstageRetiredDIBs = append(backstageRetiredDIBs, backstageDIBPair{hdcMem: hdcMem, hbmp: hbmp})
+}
+
+func backstageFlushRetiredDIBs() {
+	for _, pair := range backstageRetiredDIBs {
+		if pair.hbmp != 0 {
+			deleteObject(pair.hbmp)
+		}
+		if pair.hdcMem != 0 {
+			deleteDC(pair.hdcMem)
+		}
+	}
+	backstageRetiredDIBs = nil
+}
+
 func backstageFreeCapCache() {
 	for idx := 0; idx < 2; idx++ {
 		if backstageCapHBMP[idx] != 0 {
@@ -936,19 +969,19 @@ func backstageEnsureCapCache(w, h int) (uintptr, []byte, bool) {
 	if backstageCapHDCMem[0] != 0 && backstageCapHDCMem[1] != 0 &&
 		backstageCapW == w && backstageCapH == h &&
 		backstageCapBits[0] != nil && backstageCapBits[1] != nil {
-		backstageCapFlip ^= 1
+		if !backstageCapFlipUsed {
+			backstageCapFlip ^= 1
+			backstageCapFlipUsed = true
+		}
 		idx := backstageCapFlip
 		return backstageCapHDCScreen, unsafe.Slice((*byte)(backstageCapBits[idx]), w*h*4), true
 	}
 	for idx := 0; idx < 2; idx++ {
-		if backstageCapHBMP[idx] != 0 {
-			deleteObject(backstageCapHBMP[idx])
-			backstageCapHBMP[idx] = 0
+		if backstageCapHDCMem[idx] != 0 || backstageCapHBMP[idx] != 0 {
+			backstageRetireDIBPair(backstageCapHDCMem[idx], backstageCapHBMP[idx])
 		}
-		if backstageCapHDCMem[idx] != 0 {
-			deleteDC(backstageCapHDCMem[idx])
-			backstageCapHDCMem[idx] = 0
-		}
+		backstageCapHBMP[idx] = 0
+		backstageCapHDCMem[idx] = 0
 		backstageCapBits[idx] = nil
 	}
 	bmi := bitmapInfo{
@@ -977,6 +1010,7 @@ func backstageEnsureCapCache(w, h int) (uintptr, []byte, bool) {
 	backstageCapW = w
 	backstageCapH = h
 	backstageCapFlip = 0
+	backstageCapFlipUsed = true
 	return backstageCapHDCScreen, unsafe.Slice((*byte)(backstageCapBits[0]), w*h*4), true
 }
 
@@ -1062,6 +1096,8 @@ func BackstageCaptureDisplayOnThread(display int) (*image.RGBA, error) {
 	//garble:controlflow block_splits=10 junk_jumps=10 flatten_passes=2
 	backstageCaptureMu.Lock()
 	defer backstageCaptureMu.Unlock()
+	backstageCompFlipUsed = false
+	backstageCapFlipUsed = false
 
 	setDPIAware()
 
