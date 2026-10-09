@@ -1252,8 +1252,8 @@ function notifybackstageStatus(clientId: string, status: string, reason?: string
   }
 }
 
-// Backstage H.264 requires agent >= 3.2.10: older agents carry the upstream
-// h264 backstage bug (torn/cut-off frames) and must stay on jpeg.
+// Backstage H.264 requires agent >= 3.2.14: older agents lack FRM v2 frame
+// geometry and must stay on jpeg.
 function parseAgentVersion(v: string | undefined): [number, number, number] {
   const m = String(v || "").match(/(\d+)\.(\d+)\.(\d+)/);
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
@@ -1261,7 +1261,7 @@ function parseAgentVersion(v: string | undefined): [number, number, number] {
 function backstageCodecForTarget(target: { version?: string }, requested: string): string {
   if (String(requested || "").toLowerCase() !== "h264") return "jpeg";
   const [a, b, c] = parseAgentVersion(target.version);
-  const ok = a > 3 || (a === 3 && b > 2) || (a === 3 && b === 2 && c >= 10);
+  const ok = a > 3 || (a === 3 && b > 2) || (a === 3 && b === 2 && c >= 14);
   return ok ? "h264" : "jpeg";
 }
 
