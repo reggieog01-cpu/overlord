@@ -2417,7 +2417,7 @@ func VirtualCaptureDisplayFallback() (*image.RGBA, error) {
 	capW := srcW
 	capH := srcH
 
-	hdcScreen, buf, ok := virtualEnsureCapCache(capW, capH)
+	hdcScreen, hdcMem, buf, ok := backstageEnsureCapCache(capW, capH)
 	if !ok {
 		return nil, syscall.EINVAL
 	}
@@ -2444,69 +2444,13 @@ func VirtualCaptureDisplayFallback() (*image.RGBA, error) {
 	}
 	copy(img.Pix, buf)
 
+	_ = hdcMem
+
 	if dstW != capW || dstH != capH {
 		img = resizeNearest(img, dstW, dstH)
 	}
 
 	return img, nil
-}
-
-var (
-	virtualCapHDCScreen uintptr
-	virtualCapHDCMem    uintptr
-	virtualCapHBMP      uintptr
-	virtualCapBits      unsafe.Pointer
-	virtualCapW         int
-	virtualCapH         int
-)
-
-// virtualEnsureCapCache mirrors the single-buffered capture cache the virtual
-// path has always used; backstage capture uses its own double-buffered cache
-// because its frames are pipelined and read while the next capture runs.
-func virtualEnsureCapCache(w, h int) (uintptr, []byte, bool) {
-	if virtualCapHDCScreen == 0 {
-		virtualCapHDCScreen = getDC(0)
-		if virtualCapHDCScreen == 0 {
-			return 0, nil, false
-		}
-	}
-	if virtualCapHDCMem != 0 && virtualCapW == w && virtualCapH == h && virtualCapBits != nil {
-		return virtualCapHDCScreen, unsafe.Slice((*byte)(virtualCapBits), w*h*4), true
-	}
-	if virtualCapHBMP != 0 {
-		deleteObject(virtualCapHBMP)
-		virtualCapHBMP = 0
-	}
-	if virtualCapHDCMem != 0 {
-		deleteDC(virtualCapHDCMem)
-		virtualCapHDCMem = 0
-	}
-	virtualCapBits = nil
-
-	virtualCapHDCMem = createCompatibleDC(virtualCapHDCScreen)
-	if virtualCapHDCMem == 0 {
-		return 0, nil, false
-	}
-	bmi := bitmapInfo{
-		bmiHeader: bitmapInfoHeader{
-			biSize:        uint32(unsafe.Sizeof(bitmapInfoHeader{})),
-			biWidth:       int32(w),
-			biHeight:      -int32(h),
-			biPlanes:      1,
-			biBitCount:    32,
-			biCompression: BI_RGB,
-		},
-	}
-	virtualCapHBMP = createDIBSection(virtualCapHDCMem, &bmi, DIB_RGB_COLORS, &virtualCapBits)
-	if virtualCapHBMP == 0 || virtualCapBits == nil {
-		deleteDC(virtualCapHDCMem)
-		virtualCapHDCMem = 0
-		return 0, nil, false
-	}
-	selectObject(virtualCapHDCMem, virtualCapHBMP)
-	virtualCapW = w
-	virtualCapH = h
-	return virtualCapHDCScreen, unsafe.Slice((*byte)(virtualCapBits), w*h*4), true
 }
 
 func drawVirtualWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, target []byte, targetStride int) int {
@@ -2552,7 +2496,7 @@ func drawVirtualWindowsToBuffer(hdcScreen uintptr, bounds image.Rectangle, targe
 			continue
 		}
 
-		if drawbackstageWindow(hdcScreen, hwnd, bounds, target, targetStride) == backstageDrawOK {
+		if drawbackstageWindow(hdcScreen, hwnd, bounds, target, targetStride) {
 			drawn++
 		}
 		alive[hwnd] = true

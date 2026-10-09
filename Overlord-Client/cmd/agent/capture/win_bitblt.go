@@ -404,13 +404,8 @@ func captureBounds(mon monitorDesc) image.Rectangle {
 }
 
 func swapRB(pix []byte) {
-	n := len(pix) / 4
-	if n == 0 {
-		return
-	}
-	words := unsafe.Slice((*uint32)(unsafe.Pointer(&pix[0])), n)
-	for i, v := range words {
-		words[i] = (v & 0xFF00FF00) | ((v << 16) & 0x00FF0000) | ((v >> 16) & 0x000000FF)
+	for i := 0; i+3 < len(pix); i += 4 {
+		pix[i], pix[i+2] = pix[i+2], pix[i]
 	}
 }
 

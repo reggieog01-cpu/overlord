@@ -2041,65 +2041,6 @@ func supportsBackstageCapture() bool {
 	return count > 0
 }
 
-var (
-	backstagePrefetchMu      sync.Mutex
-	backstagePrefetchTicket  backstageCaptureTicket
-	backstagePrefetchPending bool
-	backstagePrefetchDisplay int
-)
-
-// takeBackstagePrefetch returns the in-flight capture for display, if one was
-// requested by the previous iteration. A stale ticket (different display) is
-// drained so its frame buffer is released.
-func takeBackstagePrefetch(display int) (backstageCaptureTicket, bool) {
-	backstagePrefetchMu.Lock()
-	ticket := backstagePrefetchTicket
-	pending := backstagePrefetchPending
-	prefetchDisplay := backstagePrefetchDisplay
-	backstagePrefetchPending = false
-	backstagePrefetchMu.Unlock()
-	if !pending {
-		return backstageCaptureTicket{}, false
-	}
-	if prefetchDisplay != display {
-		drainBackstageCaptureTicket(ticket)
-		return backstageCaptureTicket{}, false
-	}
-	return ticket, true
-}
-
-func setBackstagePrefetch(display int, ticket backstageCaptureTicket) {
-	backstagePrefetchMu.Lock()
-	backstagePrefetchTicket = ticket
-	backstagePrefetchDisplay = display
-	backstagePrefetchPending = true
-	backstagePrefetchMu.Unlock()
-}
-
-func drainBackstageCaptureTicket(ticket backstageCaptureTicket) {
-	if ticket == (backstageCaptureTicket{}) {
-		return
-	}
-	img, err := ticket.wait()
-	if err == nil {
-		releaseBackstageFrame(img)
-	}
-}
-
-// ClearBackstagePrefetch drains any in-flight capture left over when a stream
-// stops; the frame may wrap capture-owned DIB memory that gets freed during
-// desktop cleanup, so it must not be read afterwards.
-func ClearBackstagePrefetch() {
-	backstagePrefetchMu.Lock()
-	ticket := backstagePrefetchTicket
-	pending := backstagePrefetchPending
-	backstagePrefetchPending = false
-	backstagePrefetchMu.Unlock()
-	if pending {
-		drainBackstageCaptureTicket(ticket)
-	}
-}
-
 func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2114,13 +2055,7 @@ func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	}
 
 	t0 := time.Now()
-	var img *image.RGBA
-	var err error
-	if ticket, ok := takeBackstagePrefetch(display); ok {
-		img, err = ticket.wait()
-	} else {
-		img, err = safeBackstageCaptureDisplay(display)
-	}
+	img, err := safeBackstageCaptureDisplay(display)
 	if err != nil {
 		log.Printf("backstage capture: capture failed: %v (sending black frame)", err)
 		return sendBlackFramebackstage(ctx, env)
@@ -2131,25 +2066,17 @@ func captureAndSendbackstage(ctx context.Context, env *rt.Env) error {
 	}
 	captureDur := time.Since(t0)
 
-	// Issue the next frame's capture now so the capture thread works on it
-	// while this goroutine encodes and sends the current frame. The capture
-	// buffers are double-buffered, so the next capture never touches the
-	// pixels we are about to encode.
-	if ticket, ok := requestBackstageCapture(display); ok {
-		setBackstagePrefetch(display, ticket)
-	}
-
 	willSendViaWebRTC := backstageCodec() == "h264" && webrtcpub.IsActive(webrtcpub.Kindbackstage)
 	var slotAcquired bool
 	if !willSendViaWebRTC && !AcquireFrameSlot() {
-		releaseBackstageFrame(img)
+		PutRGBA(img)
 		return nil
 	}
 	slotAcquired = !willSendViaWebRTC
 
 	quality := backstageJPEGQuality()
 	frame, encodeDur, err := buildFramebackstage(img, display, quality)
-	releaseBackstageFrame(img)
+	PutRGBA(img)
 	img = nil
 	if err != nil {
 		if slotAcquired {
